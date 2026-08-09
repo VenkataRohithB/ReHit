@@ -1,0 +1,126 @@
+# =========================
+# Project
+# =========================
+
+DESIGN.md
+
+
+# =========================
+# Environment / Secrets
+# =========================
+
+.env
+.env.*
+!.env.example
+
+
+# =========================
+# Python / Backend
+# =========================
+
+__pycache__/
+*.py[cod]
+*$py.class
+
+*.so
+
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+
+pip-wheel-metadata/
+share/python-wheels/
+
+*.egg-info/
+.installed.cfg
+*.egg
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+.venv/
+venv/
+env/
+ENV/
+
+
+# =========================
+# Node / Frontend
+# =========================
+
+node_modules/
+.npm/
+.pnpm-store/
+
+dist/
+build/
+
+.vite/
+.vite-temp/
+
+*.tsbuildinfo
+
+
+# =========================
+# Logs
+# =========================
+
+*.log
+logs/
+
+
+# =========================
+# OS Files
+# =========================
+
+.DS_Store
+Thumbs.db
+
+
+# =========================
+# IDE / Editors
+# =========================
+
+.vscode/
+.idea/
+
+*.swp
+*.swo
+*~
+
+
+# =========================
+# Testing / Coverage
+# =========================
+
+coverage/
+.nyc_output/
+
+
+# =========================
+# Docker
+# =========================
+
+docker-compose.override.yml
+
+
+# =========================
+# Temporary Files
+# =========================
+
+*.tmp
+*.temp
+*.bak

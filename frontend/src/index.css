@@ -1,0 +1,76 @@
+@import "tailwindcss";
+
+/* Presentation Pastel — see /DESIGN.md. Nothing below is invented at the
+   component: every colour and face used in the app comes from these tokens. */
+@theme {
+  --font-display: 'Plus Jakarta Sans', system-ui, sans-serif;
+
+  --color-canvas: #FFFFFF;
+  --color-ink:    #1B2333;
+  --color-muted:  #5B6478;
+  --color-track:  #F3F5F9;
+  --color-line:   #E6E9F0;
+  --color-anchor: #4C6BE8;
+  --color-anchor-tint: #EEF2FE;
+  /* urgency — real amber and red. The pastel -ink shades read as brown/maroon
+     when used as a bar or ring fill, which looks broken rather than urgent. */
+  --color-warn:   #E8A33D;
+  --color-danger: #E5484D;
+
+  /* categorical pastels — fill + own-hue ink, all WCAG AA verified */
+  --color-mint:       #D6F4EA;  --color-mint-ink:   #0B6B52;
+  --color-peach:      #FFE4DA;  --color-peach-ink:  #9E4526;
+  --color-lilac:      #EBE2FF;  --color-lilac-ink:  #5B34B0;
+  --color-butter:     #FFF0CC;  --color-butter-ink: #7A5606;
+  --color-peri:       #DDE4FF;  --color-peri-ink:   #2B4BC4;
+  --color-rose:       #FFE1EA;  --color-rose-ink:   #B03A60;
+
+  --ease-calm: cubic-bezier(.22, 1, .36, 1);
+}
+
+html, body, #root { height: 100%; }
+body {
+  margin: 0;
+  background: var(--color-canvas);
+  color: var(--color-ink);
+  font-family: var(--font-display);
+  -webkit-font-smoothing: antialiased;
+}
+
+@keyframes slidein { from { transform: translateX(-10px); opacity: 0 } }
+@keyframes rise    { from { transform: scaleY(.15); opacity: .4 } }
+/* a joiner should feel like it lands in the room, not just fade in */
+@keyframes bubble {
+  0%   { transform: scale(.4) translateY(14px); opacity: 0 }
+  60%  { transform: scale(1.12) translateY(-3px); opacity: 1 }
+  100% { transform: scale(1) translateY(0); opacity: 1 }
+}
+
+/* a winner should arrive, not fade in */
+@keyframes reveal  { from { transform: scale(.6); opacity: 0; filter: blur(10px) } }
+@keyframes floatin { from { transform: translateY(16px); opacity: 0 } }
+/* the timer ring breathes once it is nearly out */
+@keyframes breathe { 0%,100% { transform: scale(1) } 50% { transform: scale(1.045) } }
+@keyframes shimmer { from { transform: translateX(-120%) } to { transform: translateX(420%) } }
+
+/* Lobby capsules: land, then breathe in place. These use the independent
+   `scale` / `translate` properties rather than `transform`, so the one-shot
+   entrance and the endless bob can run at the same time without clobbering
+   each other — which a two-animation `transform` list cannot do. */
+@keyframes joinpop { 0% { scale: 0; opacity: 0 } 60% { scale: 1.1 } 100% { scale: 1; opacity: 1 } }
+@keyframes bob     { 0%,100% { translate: 0 0 } 50% { translate: 0 -5px } }
+
+.anim-join {
+  animation: joinpop .45s cubic-bezier(.34,1.56,.64,1) backwards,
+             bob var(--bob,4s) ease-in-out var(--bob-delay,0s) infinite;
+}
+
+.anim-slidein { animation: slidein .4s var(--ease-calm) both }
+.anim-rise    { animation: rise .55s var(--ease-calm) both; transform-origin: bottom }
+.anim-bubble  { animation: bubble .5s cubic-bezier(.34,1.56,.64,1) both }
+.anim-pop     { animation: reveal .52s cubic-bezier(.34,1.56,.64,1) both }
+.anim-floatin { animation: floatin .52s .12s cubic-bezier(.34,1.56,.64,1) both }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important }
+}

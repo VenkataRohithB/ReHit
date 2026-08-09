@@ -1,0 +1,24 @@
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      SESSION_SECS: "43200"     # logged in for 12h
+      READ_SECS: "5"               # question shown alone before options open
+      ADVANCE_TIMEOUT_SECS: "900"   # backstop if a host abandons a game
+      ROOM_TTL_SECS: "3600"
+      DB_PATH: /data/quiz.db    # saved quizzes + game history (backend/app/store.py)
+      HISTORY_LIMIT: "10"       # finished games kept; older roll off with their CSV
+      SAVED_QUIZZES: "10"       # reusable quiz definitions kept
+    volumes:
+      - quiz-data:/data         # history survives rebuilds and restarts
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/api/health')"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+
+volumes:
+  quiz-data:

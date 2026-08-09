@@ -1,0 +1,725 @@
+import { useCallback, useEffect, useState } from 'react'
+import QRCode from 'qrcode'
+import {
+  login, createQuiz, downloadCsv, activity, savedQuiz, runSavedQuiz, deleteQuiz,
+  wsUrl, AuthError,
+} from '../lib/api.js'
+import { parseQuiz, EXAMPLE } from '../lib/parseQuiz.js'
+import { useSocket } from '../lib/useSocket.js'
+import {
+  Screen, JoinStrip, Button, TimerRing, OptionKey, ResultBars, RaceBoard,
+  WinnerFinale, LobbyPills, QuestionMedia, tone,
+} from '../ui.jsx'
+
+const TOKEN_KEY = 'quiz.token'
+const CODE_KEY = 'quiz.code'
+const BASE_KEY = 'quiz.base'   // public address players reach this host at
+const READ_KEY = 'quiz.read'   // seconds of reading time, for the builder hint
+
+/* Session lives in localStorage and the token is signed rather than stored on
+   the server, so a reload, a new tab, or a server restart all keep you logged in
+   and drop you back into the room you were hosting. */
+const blankQ = () => ({ text: '', timer: 20, options: ['', ''], correct: 0 })
+const todayName = () =>
+  `Quiz — ${new Date().toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}`
+const blankQuiz = () => ({ title: todayName(), capacity: 60, questions: [blankQ()] })
+
+export default function Admin() {
+  const [token, setTok] = useState(() => localStorage.getItem(TOKEN_KEY))
+  const [code, setCod] = useState(() => localStorage.getItem(CODE_KEY))
+  const [draft, setDraft] = useState(null)   // non-null while the builder is open
+
+  const setToken = (t) => {
+    t ? localStorage.setItem(TOKEN_KEY, t) : localStorage.removeItem(TOKEN_KEY)
+    setTok(t)
+  }
+  const setCode = (c) => {
+    c ? localStorage.setItem(CODE_KEY, c) : localStorage.removeItem(CODE_KEY)
+    setCod(c)
+  }
+  const logout = () => { setCode(null); setDraft(null); setToken(null) }
+
+  if (!token) return <Login onToken={setToken} />
+  if (code) return <Host token={token} code={code} onExit={() => setCode(null)} onAuthFail={logout} />
+  if (draft) {
+    return <Builder token={token} initial={draft}
+      onCreated={(c) => { setDraft(null); setCode(c) }}
+      onCancel={() => setDraft(null)} onAuthFail={logout} />
+  }
+  return <Dashboard token={token} onNew={() => setDraft(blankQuiz())} onEdit={setDraft}
+    onOpen={setCode} onAuthFail={logout} />
+}
+
+/* ============================ login ============================ */
+function Login({ onToken }) {
+  const [u, setU] = useState('Admin')
+  const [p, setP] = useState('')
+  const [err, setErr] = useState('')
+  const submit = async (e) => {
+    e.preventDefault()
+    try {
+      const { token, read_secs } = await login(u, p)
+      localStorage.setItem(READ_KEY, String(read_secs ?? 0))
+      onToken(token)
+    } catch { setErr('Those credentials did not work') }
+  }
+  return (
+    <Screen>
+      <form onSubmit={submit} className="m-auto flex w-full max-w-sm flex-col gap-3">
+        <h1 className="mb-2 text-3xl font-extrabold tracking-tight">Quiz Live</h1>
+        <input value={u} onChange={(e) => setU(e.target.value)} placeholder="Username"
+          aria-label="Username"
+          className="rounded-2xl border-2 border-line px-4 py-3 outline-none focus:border-anchor" />
+        <input type="password" value={p} onChange={(e) => setP(e.target.value)} placeholder="Password"
+          aria-label="Password"
+          className="rounded-2xl border-2 border-line px-4 py-3 outline-none focus:border-anchor" />
+        <Button type="submit">Log in</Button>
+        {err && <p role="alert" className="font-semibold text-rose-ink">{err}</p>}
+      </form>
+    </Screen>
+  )
+}
+
+/* ============================ dashboard ============================ */
+const when = (t) => {
+  if (!t) return '—'
+  const d = new Date(t * 1000)
+  return d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' }) + ' ' +
+    d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
+}
+
+/* Secondary actions live behind ⋯ so each row reads as one thing with one
+   obvious button, instead of a wall of CSV / ✕ / Re-run repeated down the page. */
+function RowMenu({ row, open, onToggle, onRerun, onEdit, onCsv, onDelete }) {
+  const items = [
+    row.quiz_id != null && { label: 'Re-run this quiz', fn: onRerun },
+    row.quiz_id != null && { label: 'Edit questions', fn: onEdit },
+    // always listed, disabled with a reason when that quiz has never finished
+    { label: 'Download CSV', fn: onCsv, off: !row.code, hint: row.code ? null : 'no results' },
+    row.quiz_id != null && { label: 'Delete quiz', fn: onDelete, danger: true },
+  ].filter(Boolean)
+  if (!items.length) return null
+  return (
+    <div className="relative" data-menu>
+      <button onClick={onToggle} aria-label={`More actions for ${row.title}`}
+        aria-expanded={open}
+        className={`grid size-8 place-items-center rounded-lg text-lg font-bold leading-none
+          text-muted hover:bg-white hover:text-ink ${open ? 'bg-white text-ink' : ''}`}>⋯</button>
+      {open && (
+        <div role="menu"
+          className="absolute right-0 top-9 z-20 w-48 overflow-hidden rounded-xl border
+            border-line bg-canvas py-1 shadow-lg">
+          {items.map((it) => (
+            <button key={it.label} role="menuitem" disabled={it.off}
+              onClick={() => { onToggle(); it.fn() }}
+              className={`flex w-full items-baseline justify-between gap-2 px-4 py-2 text-left
+                text-sm font-semibold enabled:hover:bg-track disabled:opacity-40
+                ${it.danger ? 'text-rose-ink' : 'text-ink'}`}>
+              {it.label}
+              {it.hint && <span className="text-xs font-normal text-muted">{it.hint}</span>}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function Dashboard({ token, onNew, onEdit: openInBuilder, onOpen, onAuthFail }) {
+  const [data, setData] = useState(null)
+  const [err, setErr] = useState('')
+  const [busy, setBusy] = useState(null)
+  const [menu, setMenu] = useState(null)
+
+  // any click outside a menu closes it
+  useEffect(() => {
+    const close = (e) => { if (!e.target.closest('[data-menu]')) setMenu(null) }
+    document.addEventListener('click', close)
+    return () => document.removeEventListener('click', close)
+  }, [])
+
+  const fail = useCallback((e) => (e instanceof AuthError ? onAuthFail() : setErr(e.message)),
+    [onAuthFail])
+
+  useEffect(() => { activity(token).then(setData).catch(fail) }, [token, fail])
+
+  const grab = async (code) => {
+    try { await downloadCsv(token, code) } catch (e) { fail(e) }
+  }
+
+  const rerun = async (row) => {
+    setErr(''); setBusy(row.quiz_id)
+    try { onOpen(await runSavedQuiz(token, row.quiz_id)) } catch (e) { fail(e); setBusy(null) }
+  }
+
+  const edit = async (row) => {
+    try { openInBuilder(await savedQuiz(token, row.quiz_id)) } catch (e) { fail(e) }
+  }
+
+  const remove = async (row) => {
+    try {
+      await deleteQuiz(token, row.quiz_id)
+      setData((d) => ({ ...d, rows: d.rows.filter((x) => x.quiz_id !== row.quiz_id) }))
+    } catch (e) { fail(e) }
+  }
+
+  return (
+    <div className="mx-auto max-w-4xl p-6">
+      <div className="mb-8 flex flex-wrap items-center justify-between gap-3">
+        <h1 className="text-3xl font-extrabold tracking-tight">Quiz Live</h1>
+        <div className="flex items-center gap-3">
+          <Button onClick={onNew}>New quiz</Button>
+          <button onClick={onAuthFail}
+            className="rounded-xl px-3 py-2 text-sm font-semibold text-muted hover:text-ink">
+            Log out
+          </button>
+        </div>
+      </div>
+
+      {err && <p role="alert" className="mb-4 font-semibold text-rose-ink">{err}</p>}
+
+      {data?.live?.length > 0 && (
+        <section className="mb-8">
+          <h2 className="mb-3 text-xs font-semibold uppercase tracking-[.1em] text-muted">
+            Running now
+          </h2>
+          <div className="flex flex-col gap-2">
+            {data.live.map((r) => (
+              <button key={r.code} onClick={() => onOpen(r.code)}
+                className="flex items-center gap-4 rounded-2xl bg-mint px-4 py-3 text-left
+                  text-mint-ink transition hover:brightness-[.97]">
+                <span className="font-extrabold tracking-[.1em]">{r.code}</span>
+                <span className="flex-1 text-sm font-semibold">
+                  {r.title && <b className="font-extrabold">{r.title} · </b>}
+                  {r.players} joined · {r.questions} question{r.questions === 1 ? '' : 's'} · {r.state}
+                </span>
+                <span className="text-sm font-extrabold">Resume →</span>
+              </button>
+            ))}
+          </div>
+        </section>
+      )}
+
+      <h2 className="mb-3 text-xs font-semibold uppercase tracking-[.1em] text-muted">
+        Recent quizzes
+      </h2>
+
+      {!data && <p className="text-muted">Loading…</p>}
+      {data && !data.rows.length && (
+        <div className="rounded-2xl border border-line p-8 text-center">
+          <p className="font-semibold">Nothing here yet.</p>
+          <p className="mt-1 text-sm text-muted">
+            Every quiz you create is kept here, ready to run again.
+          </p>
+        </div>
+      )}
+
+      <div className="flex flex-col gap-2">
+        {data?.rows.map((row) => (
+          <div key={row.quiz_id ?? row.code}
+            className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-2xl bg-track px-4 py-3">
+            <span className="font-extrabold">{row.title}</span>
+            <span className="text-sm font-semibold tabular-nums text-muted">
+              {row.questions} question{row.questions === 1 ? '' : 's'} · {when(row.last_run)}
+              {row.players != null && ` · ${row.players} player${row.players === 1 ? '' : 's'}`}
+            </span>
+            {row.winner && (
+              <span className="flex items-center gap-1.5 rounded-full bg-butter px-3 py-1
+                text-sm font-semibold text-butter-ink">
+                Winner {row.winner.email.split('@')[0]}
+                <b className="font-extrabold tabular-nums">{row.winner.score}</b>
+              </span>
+            )}
+            <span className="flex-1" />
+            {busy === row.quiz_id && (
+              <span className="text-sm font-semibold text-anchor">Starting…</span>
+            )}
+            <RowMenu row={row} open={menu === (row.quiz_id ?? row.code)}
+              onRerun={() => rerun(row)}
+              onToggle={() => setMenu((m) => (m === (row.quiz_id ?? row.code)
+                ? null : (row.quiz_id ?? row.code)))}
+              onEdit={() => edit(row)} onCsv={() => grab(row.code)} onDelete={() => remove(row)} />
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+/* The configured seconds are split into reading + answering, so say so rather
+   than letting a 10s question silently become 5s of each. */
+function TimerSplit({ total, read }) {
+  const t = Number(total) || 0
+  if (t < 1) return null
+  const r = Math.max(0, Math.min(read, t - 1))
+  return (
+    <span className="whitespace-nowrap text-xs text-muted">
+      {r > 0 ? `= ${r}s read + ${t - r}s answer` : 'no reading time'}
+    </span>
+  )
+}
+
+/* ============================ bulk import ============================ */
+function BulkImport({ existing, onLoad, onClose }) {
+  const [text, setText] = useState('')
+  const parsed = text.trim() ? parseQuiz(text) : null
+  const ready = parsed?.questions.length || 0
+  const replacing = existing.filter((q) => q.text.trim()).length
+
+  return (
+    <div className="mb-6 rounded-2xl border border-line p-5">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <h2 className="font-extrabold">Paste questions</h2>
+        <button onClick={onClose}
+          className="text-sm font-semibold text-muted hover:text-ink">Close</button>
+      </div>
+
+      <p className="mb-3 text-sm text-muted">
+        One question per block. Options start with <code className="rounded bg-track px-1">-</code>,
+        and <code className="rounded bg-track px-1">*</code> marks the correct one.
+        Add <code className="rounded bg-track px-1">[20]</code> after a question to set its timer.
+        JSON works too.
+      </p>
+
+      <textarea value={text} onChange={(e) => setText(e.target.value)} rows={10} spellCheck="false"
+        aria-label="Questions to import" placeholder={EXAMPLE}
+        className="w-full resize-y rounded-xl border-2 border-line bg-canvas p-3 font-mono
+          text-sm outline-none placeholder:text-muted/50 focus:border-anchor" />
+
+      <div className="mt-3 flex flex-wrap items-center gap-3">
+        <Button disabled={!ready} onClick={() => onLoad(parsed.questions)}>
+          {ready ? `Load ${ready} question${ready === 1 ? '' : 's'}` : 'Load questions'}
+        </Button>
+        <button onClick={() => setText(EXAMPLE)}
+          className="rounded-xl bg-track px-4 py-3 text-sm font-extrabold hover:brightness-95">
+          Use the example
+        </button>
+        {ready > 0 && replacing > 0 && (
+          <span className="text-sm text-muted">
+            replaces the {replacing} question{replacing === 1 ? '' : 's'} below
+          </span>
+        )}
+      </div>
+
+      {parsed?.errors.length > 0 && (
+        <ul className="mt-3 flex flex-col gap-1">
+          {parsed.errors.map((e, i) => (
+            <li key={i} className="flex gap-2 rounded-lg bg-rose px-3 py-1.5 text-sm text-rose-ink">
+              {e.line > 0 && <b className="font-extrabold tabular-nums">Line {e.line}</b>}
+              <span>{e.msg}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
+
+/* ============================ builder ============================ */
+function Builder({ token, initial, onCreated, onCancel, onAuthFail }) {
+  const [title, setTitle] = useState(initial.title)
+  const [capacity, setCapacity] = useState(initial.capacity)
+  const [questions, setQuestions] = useState(
+    initial.questions.map((q) => ({ ...q, timer: String(q.timer ?? 20) })))
+  const [err, setErr] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [bulk, setBulk] = useState(false)
+  const readSecs = Number(localStorage.getItem(READ_KEY) || 0)
+  const patch = (qi, fn) => setQuestions((qs) => qs.map((q, i) => (i === qi ? fn(q) : q)))
+
+  const create = async () => {
+    if (!title.trim()) { setErr('Give the quiz a name so you can find it again'); return }
+    setErr(''); setBusy(true)
+    try {
+      onCreated(await createQuiz(token, {
+        title: title.trim(),
+        capacity: Number(capacity),
+        questions: questions.map((q) => ({
+          text: q.text.trim(), timer: Number(q.timer) || 20,
+          options: q.options.map((o) => o.trim()).filter(Boolean), correct: q.correct,
+          code: q.code?.trim() ? q.code : null,     // omit the optional extras when unused
+          image: q.image?.trim() ? q.image.trim() : null,
+        })),
+      }))
+    } catch (e) {
+      if (e instanceof AuthError) return onAuthFail()
+      setErr(e.message)
+    } finally { setBusy(false) }
+  }
+
+  return (
+    <div className="mx-auto max-w-3xl p-6">
+      <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
+        <input value={title} onChange={(e) => setTitle(e.target.value)}
+          aria-label="Quiz name" placeholder="Name this quiz"
+          className="min-w-0 flex-1 rounded-xl border-2 border-transparent bg-track px-3 py-2
+            text-2xl font-extrabold tracking-tight outline-none
+            placeholder:text-muted/60 focus:border-anchor focus:bg-canvas" />
+        <div className="flex items-center gap-3">
+          <label className="flex items-center gap-2 text-sm font-semibold text-muted">
+            Room capacity
+            <input type="number" min="1" value={capacity} onChange={(e) => setCapacity(e.target.value)}
+              className="w-24 rounded-lg border-2 border-line px-2 py-1.5 text-ink
+                outline-none focus:border-anchor" />
+          </label>
+          <button onClick={() => setBulk((b) => !b)}
+            className="rounded-xl bg-track px-4 py-2 text-sm font-extrabold hover:brightness-95">
+            Paste questions
+          </button>
+          <button onClick={onCancel}
+            className="rounded-xl px-3 py-2 text-sm font-semibold text-muted hover:text-ink">
+            Cancel
+          </button>
+        </div>
+      </div>
+
+      {bulk && (
+        <BulkImport existing={questions} onClose={() => setBulk(false)}
+          onLoad={(qs) => {
+            setQuestions(qs.map((q) => ({ ...q, timer: String(q.timer) })))
+            setBulk(false)
+            setErr('')
+          }} />
+      )}
+
+      <div className="flex flex-col gap-5">
+        {questions.map((q, qi) => (
+          <div key={qi} className="rounded-2xl border border-line p-5">
+            <div className="mb-4 flex items-center gap-3">
+              <span className="font-extrabold text-anchor">Q{qi + 1}</span>
+              <input value={q.text} onChange={(e) => patch(qi, (x) => ({ ...x, text: e.target.value }))}
+                placeholder="Question" aria-label={`Question ${qi + 1} text`}
+                className="flex-1 rounded-lg border-2 border-line px-3 py-2 outline-none focus:border-anchor" />
+              <label className="flex items-center gap-1.5 text-sm text-muted">
+                <input type="number" min="1" value={q.timer} aria-label="Seconds"
+                  onChange={(e) => patch(qi, (x) => ({ ...x, timer: e.target.value }))}
+                  className="w-16 rounded-lg border-2 border-line px-2 py-2 text-center text-ink
+                    outline-none focus:border-anchor" />s
+                {readSecs > 0 && <TimerSplit total={q.timer} read={readSecs} />}
+              </label>
+              {questions.length > 1 && (
+                <button onClick={() => setQuestions((qs) => qs.filter((_, i) => i !== qi))}
+                  aria-label={`Remove question ${qi + 1}`}
+                  className="rounded-lg px-2 py-1 font-bold text-muted hover:text-rose-ink">✕</button>
+              )}
+            </div>
+
+            {(q.code || q.image || q.extras) ? (
+              <div className="mb-3 flex flex-col gap-2">
+                <textarea value={q.code || ''} rows={4} spellCheck="false"
+                  aria-label={`Code snippet for question ${qi + 1}`}
+                  placeholder="Optional code snippet — shown above the options"
+                  onChange={(e) => patch(qi, (x) => ({ ...x, code: e.target.value }))}
+                  className="w-full resize-y rounded-lg border-2 border-line bg-track p-3 font-mono
+                    text-sm outline-none placeholder:text-muted/60 focus:border-anchor" />
+                <input value={q.image || ''} aria-label={`Image URL for question ${qi + 1}`}
+                  placeholder="Optional image URL — https://…"
+                  onChange={(e) => patch(qi, (x) => ({ ...x, image: e.target.value }))}
+                  className="w-full rounded-lg border-2 border-line px-3 py-2 text-sm
+                    outline-none placeholder:text-muted/60 focus:border-anchor" />
+              </div>
+            ) : (
+              <button onClick={() => patch(qi, (x) => ({ ...x, extras: true }))}
+                className="mb-3 text-sm font-semibold text-anchor hover:underline">
+                + Add code snippet or image
+              </button>
+            )}
+
+            <div className="flex flex-col gap-2">
+              {q.options.map((opt, oi) => {
+                const t = tone(oi)
+                return (
+                  <div key={oi} className={`flex items-center gap-3 rounded-xl ${t.fill} px-3 py-2`}>
+                    <input type="radio" name={`c${qi}`} checked={q.correct === oi}
+                      onChange={() => patch(qi, (x) => ({ ...x, correct: oi }))}
+                      aria-label={`Mark option ${t.key} correct`} className="size-4 accent-mint-ink" />
+                    <OptionKey className={t.ink}>{t.key}</OptionKey>
+                    <input value={opt} placeholder={`Option ${t.key}`} aria-label={`Option ${t.key}`}
+                      onChange={(e) => patch(qi, (x) => ({
+                        ...x, options: x.options.map((o, i) => (i === oi ? e.target.value : o)),
+                      }))}
+                      className={`flex-1 bg-transparent font-semibold outline-none
+                        ${t.ink} placeholder:opacity-50`} />
+                    {q.options.length > 2 && (
+                      <button aria-label={`Remove option ${t.key}`}
+                        onClick={() => patch(qi, (x) => ({
+                          ...x,
+                          options: x.options.filter((_, i) => i !== oi),
+                          correct: x.correct >= oi && x.correct > 0 ? x.correct - 1 : x.correct,
+                        }))}
+                        className={`font-bold opacity-50 hover:opacity-100 ${t.ink}`}>✕</button>
+                    )}
+                  </div>
+                )
+              })}
+              {q.options.length < 6 && (
+                <button onClick={() => patch(qi, (x) => ({ ...x, options: [...x.options, ''] }))}
+                  className="self-start text-sm font-semibold text-anchor hover:underline">
+                  + Add option
+                </button>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div className="mt-5 flex flex-wrap items-center gap-3">
+        <button onClick={() => setQuestions((qs) => [...qs, blankQ()])}
+          className="rounded-xl bg-track px-5 py-3.5 font-extrabold hover:brightness-95">
+          + Add question
+        </button>
+        <Button onClick={create} disabled={busy}>{busy ? 'Creating…' : 'Create room'}</Button>
+        {err && <span role="alert" className="font-semibold text-rose-ink">{err}</span>}
+      </div>
+    </div>
+  )
+}
+
+/* ============================ host console ============================ */
+function Host({ token, code, onExit, onAuthFail }) {
+  const [lobby, setLobby] = useState({ players: [], count: 0, capacity: 0 })
+  const [phase, setPhase] = useState('lobby')
+  const [question, setQuestion] = useState(null)
+  const [progress, setProgress] = useState({ answered: 0, total: 0 })
+  const [results, setResults] = useState(null)
+  const [over, setOver] = useState(null)
+  const [qr, setQr] = useState('')
+
+  /* Players scan whatever this host is reachable at. Opening the console through
+     a tunnel already gives the right origin; this override covers hosting on
+     localhost while players come in over ngrok. */
+  const [base, setBase] = useState(() => localStorage.getItem(BASE_KEY) || location.origin)
+  const cleanBase = base.trim().replace(/\/+$/, '') || location.origin
+  const joinUrl = `${cleanBase}/join/${code}`
+  let publicHost = location.host
+  try { publicHost = new URL(cleanBase).host } catch { /* mid-typing, keep the last good one */ }
+
+  useEffect(() => {
+    QRCode.toDataURL(joinUrl, { margin: 1, width: 260, color: { dark: '#1B2333', light: '#FFFFFF' } })
+      .then(setQr).catch(() => setQr(''))
+  }, [joinUrl])
+
+  const onMsg = useCallback((m) => {
+    switch (m.type) {
+      case 'error': if (m.msg === 'Room not found') onExit(); break
+      case 'lobby': setLobby(m); break
+      case 'question':
+        // the reading-phase payload has no options; merge so the later reveal fills them in
+        setQuestion((q) => (q && q.index === m.index ? { ...q, ...m } : m))
+        if (m.phase !== 'reading') setProgress({ answered: 0, total: 0 })
+        setPhase('question'); break
+      case 'progress': setProgress(m); break
+      // one payload drives both insight screens; the host steps through them
+      case 'results': setResults(m); setPhase('bars'); break
+      case 'game_over': setOver(m); setPhase('over'); break
+      default: break
+    }
+  }, [onExit])
+
+  const { status, send } = useSocket(wsUrl(`/ws/host/${code}?token=${token}`), onMsg)
+  const players = phase === 'lobby' ? `${lobby.count} / ${lobby.capacity} joined` : `${lobby.count} players`
+
+  const grab = async () => {
+    try { await downloadCsv(token, code) } catch (e) { if (e instanceof AuthError) onAuthFail() }
+  }
+  // the room holds on the insights screen until this is sent
+  const [advancing, setAdvancing] = useState(false)
+  // only show it as advancing if the request actually left — otherwise the button
+  // greys out on a dead socket and the host is stuck with no idea why
+  const next = () => { if (send({ type: 'next' })) setAdvancing(true) }
+
+  // navigator.clipboard does not exist on a plain-http origin, which is exactly
+  // how this gets hosted for a class (http://<laptop-ip>:8000). Fall back to the
+  // old selection API, and always confirm, so the button is never silently dead.
+  const [copied, setCopied] = useState(false)
+  const copyLink = async () => {
+    try {
+      if (navigator.clipboard) await navigator.clipboard.writeText(joinUrl)
+      else {
+        const ta = document.createElement('textarea')
+        ta.value = joinUrl
+        ta.style.cssText = 'position:fixed;opacity:0'
+        document.body.appendChild(ta)
+        ta.select()
+        document.execCommand('copy')
+        ta.remove()
+      }
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    } catch { /* the URL is on screen anyway — copy it by hand */ }
+  }
+  useEffect(() => { setAdvancing(false) }, [results, over])
+
+  return (
+    <Screen>
+      <JoinStrip code={code} right={players} host={publicHost} />
+
+      {phase === 'lobby' && (
+        <div className="grid flex-1 grid-cols-1 items-stretch gap-6 md:grid-cols-[minmax(0,31%)_1fr]">
+          <div className="flex flex-col items-center justify-center gap-3 rounded-3xl bg-track p-6">
+            <span className="text-xs font-semibold uppercase tracking-[.1em] text-muted">Room code</span>
+            <span className="text-[clamp(1.8rem,4vw,3.4rem)] font-extrabold tracking-[.12em] text-anchor">
+              {code}
+            </span>
+            {qr && <img src={qr} alt={`QR code to join room ${code}`} className="w-[min(58%,15rem)] rounded-xl" />}
+            <button onClick={copyLink} title="Copy join link"
+              className={`max-w-full truncate text-xs hover:text-anchor
+                ${copied ? 'font-bold text-mint-ink' : 'text-muted'}`}>
+              {copied ? 'Copied ✓' : joinUrl}
+            </button>
+            <input value={base} aria-label="Public address players use"
+              placeholder="https://your-tunnel.ngrok-free.app"
+              onChange={(e) => {
+                setBase(e.target.value)
+                localStorage.setItem(BASE_KEY, e.target.value)
+              }}
+              className="w-full rounded-lg border border-line bg-canvas px-2 py-1.5 text-center
+                text-xs outline-none placeholder:text-muted/50 focus:border-anchor" />
+            <span className="text-[11px] text-muted">
+              Public address — change it if players join through a tunnel
+            </span>
+          </div>
+
+          <div className="flex min-w-0 flex-col gap-4">
+            {lobby.title && (
+              <h1 className="text-[clamp(1.3rem,3vw,2.6rem)] font-extrabold leading-tight
+                tracking-tight text-balance">{lobby.title}</h1>
+            )}
+            <p className="text-[clamp(1rem,1.8vw,1.5rem)] font-semibold text-muted">
+              <b className="text-[1.25em] font-extrabold text-ink tabular-nums">{lobby.count}</b>
+              {' '}of {lobby.capacity} joined — waiting for you to start
+            </p>
+            {lobby.count
+              ? <LobbyPills players={lobby.players} />
+              : <p className="flex-1 text-muted">No one has joined yet.</p>}
+            <div className="flex items-center gap-3">
+              <Button onClick={() => send({ type: 'start' })} disabled={!lobby.count}
+                className="text-lg">Start the quiz</Button>
+              <button onClick={onExit}
+                className="rounded-xl px-3 py-2 text-sm font-semibold text-muted hover:text-ink">
+                Back
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {phase === 'question' && question && (
+        <>
+          <h2 className="flex-none text-[clamp(1.4rem,4.2vw,4rem)] font-extrabold leading-tight
+            tracking-tight text-balance">{question.text}</h2>
+          <QuestionMedia code={question.code} image={question.image} />
+
+          {question.phase === 'reading' ? (
+            /* question alone first — nobody can answer, nothing is being timed */
+            <div className="flex flex-1 flex-col items-center justify-center gap-2">
+              <TimerRing remaining={question.remaining} total={question.window}
+                qkey={`r${question.index}`} className="w-[clamp(5rem,12vw,9rem)]" />
+              <p className="text-[clamp(.9rem,1.8vw,1.4rem)] font-semibold text-muted">
+                Read the question — options open in a moment
+              </p>
+            </div>
+          ) : (
+            <>
+              <div className="grid flex-1 grid-cols-1 gap-3 sm:grid-cols-2">
+                {question.options.map((o, i) => {
+                  const t = tone(i)
+                  return (
+                    <div key={i} style={{ animationDelay: `${i * 70}ms` }}
+                      className={`anim-pop flex items-center gap-3 rounded-2xl px-5
+                        text-[clamp(1rem,2vw,1.9rem)] font-semibold ${t.fill} ${t.ink}`}>
+                      <OptionKey>{t.key}</OptionKey>{o}
+                    </div>
+                  )
+                })}
+              </div>
+              <div className="flex flex-none items-center justify-between gap-4">
+                <span className="flex items-baseline gap-3">
+                  <b className="text-[clamp(1.6rem,4vw,3.4rem)] font-extrabold tabular-nums">
+                    {progress.answered}
+                  </b>
+                  <span className="font-semibold text-muted">of {progress.total} answered</span>
+                </span>
+                <TimerRing remaining={question.remaining} total={question.window}
+                  qkey={question.index} className="w-[clamp(4rem,9vw,7.5rem)]" />
+              </div>
+            </>
+          )}
+        </>
+      )}
+
+      {/* step 1 — what everyone picked */}
+      {phase === 'bars' && results && (
+        <>
+          <div className="flex flex-none items-baseline gap-4">
+            <h2 className="text-[clamp(1.2rem,3vw,2.6rem)] font-extrabold tracking-tight text-balance">
+              {question?.text}
+            </h2>
+          </div>
+          {/* keep the snippet on screen while the room discusses the answer */}
+          <QuestionMedia code={results.code} image={results.image} className="max-h-[26vh]" />
+          <ResultBars tally={results.tally} options={results.options} correct={results.correct} />
+          <div className="flex flex-none items-center justify-between gap-4">
+            <span className="font-semibold text-muted">
+              Correct answer · {results.options[results.correct]} ·{' '}
+              {results.tally[results.correct]} of {results.total_players} got it
+            </span>
+            <Button onClick={() => setPhase('board')} className="flex-none">
+              Show leaderboard →
+            </Button>
+          </div>
+        </>
+      )}
+
+      {/* step 2 — where that leaves everyone */}
+      {phase === 'board' && results && (
+        <>
+          <div className="flex flex-none items-baseline gap-4">
+            <h2 className="text-[clamp(1.5rem,3vw,2.6rem)] font-extrabold tracking-tight">Leaderboard</h2>
+            <span className="font-semibold text-muted">
+              After question {results.index + 1} of {question?.total ?? '—'}
+            </span>
+          </div>
+          <RaceBoard rows={results.leaderboard} />
+          <div className="flex flex-none items-center justify-between gap-4">
+            <span className="font-semibold text-muted">
+              Top {results.leaderboard.length} of {results.total_players} players
+            </span>
+            <div className="flex flex-none items-center gap-2">
+              <button onClick={() => setPhase('bars')}
+                className="rounded-xl px-4 py-3 font-semibold text-muted hover:text-ink">
+                ← Back to results
+              </button>
+              <Button onClick={next} disabled={advancing} className="flex-none">
+                {results.last ? 'Show final results' : 'Next question →'}
+              </Button>
+            </div>
+          </div>
+        </>
+      )}
+
+      {phase === 'over' && over && (
+        <>
+          <WinnerFinale rows={over.leaderboard} totalPlayers={over.total_players} />
+          <div className="flex flex-none flex-wrap items-center justify-center gap-2">
+            {over.leaderboard.slice(3, 8).map((p, i) => (
+              <span key={p.email} className="rounded-full bg-track px-4 py-1.5
+                text-[clamp(.7rem,1.2vw,1rem)] font-semibold">
+                {i + 4} · {p.email.split('@')[0]}{' '}
+                <b className="font-extrabold tabular-nums">{p.score}</b>
+              </span>
+            ))}
+            <Button onClick={grab}>Download CSV</Button>
+            <button onClick={onExit}
+              className="rounded-xl px-4 py-3 font-semibold text-muted hover:text-ink">Done</button>
+          </div>
+        </>
+      )}
+
+      {status !== 'open' && (
+        <p className="flex-none text-center text-sm font-semibold text-peach-ink">Reconnecting…</p>
+      )}
+    </Screen>
+  )
+}
+
