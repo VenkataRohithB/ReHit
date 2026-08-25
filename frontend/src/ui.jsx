@@ -82,16 +82,30 @@ export const faceOf = (email) => EMOJI[hash(email) % EMOJI.length]
  *  reaches a resting state: pills jitter, shove each other and swap places
  *  forever. Layout that *cannot* overlap beats physics that *must not*.
  *
+ *  Only the most recent RECENT_SHOWN are drawn, newest first. Every joiner
+ *  getting a pill meant each arrival re-flowed the whole wall and stepped the
+ *  type down, so a full room churned on every join. The headline count above
+ *  is the real number; these are the last few faces through the door.
+ *
  *  Everything varying per person (hue, float speed, phase) is derived from a hash
  *  of the email, so a face and its rhythm never change mid-lobby. */
+const RECENT_SHOWN = 30
+
 export function LobbyPills({ players }) {
-  const n = players.length
-  // step the type down as the room fills so ~70 names still fit without scrolling
-  const size = n > 45 ? '.74rem' : n > 24 ? '.88rem' : n > 12 ? '1rem' : '1.15rem'
+  const shown = players.slice(-RECENT_SHOWN).reverse()   // newest through the door first
+  const hidden = players.length - shown.length
+  const size = shown.length > 12 ? '.9rem' : '1.15rem'
   return (
     <div className="flex min-h-0 flex-1 flex-wrap content-center items-center justify-center
       gap-[clamp(.3rem,.75vw,.65rem)] overflow-hidden p-2">
-      {players.map((email) => {
+      {hidden > 0 && (
+        <span style={{ fontSize: size }}
+          className="flex items-center rounded-full bg-ink/5 px-3 py-1.5 font-bold
+            leading-none text-muted tabular-nums">
+          +{hidden} more
+        </span>
+      )}
+      {shown.map((email) => {
         const h = hash(email)
         const t = TONES[h % TONES.length]
         return (
