@@ -4,6 +4,8 @@ services:
     ports:
       - "8000:8000"
     environment:
+      ADMIN_USER: "Admin"
+      ADMIN_PASS: "AUACAD@2026"
       SESSION_SECS: "43200"     # logged in for 12h
       READ_SECS: "5"               # question shown alone before options open
       ADVANCE_TIMEOUT_SECS: "900"   # backstop if a host abandons a game

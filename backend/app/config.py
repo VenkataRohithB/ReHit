@@ -11,7 +11,7 @@ def _int(name, default):
 
 class Settings:
     admin_user = os.getenv("ADMIN_USER", "Admin")
-    admin_pass = os.getenv("ADMIN_PASS", "Password123")
+    admin_pass = os.getenv("ADMIN_PASS", "AUACAD@2026")
 
     # question is shown alone for this long before the options appear; the answer
     # clock (and therefore scoring) only starts once they do
