@@ -322,14 +322,16 @@ function Builder({ token, initial, onCreated, onCancel, onAuthFail }) {
   const [questions, setQuestions] = useState(
     initial.questions.map((q) => ({ ...q, timer: String(q.timer ?? 20) })))
   const [err, setErr] = useState('')
-  const [busy, setBusy] = useState(false)
+  const [busy, setBusy] = useState('')      // '' | 'save' | 'start' — which button is in flight
   const [bulk, setBulk] = useState(false)
   const readSecs = Number(localStorage.getItem(READ_KEY) || 0)
   const patch = (qi, fn) => setQuestions((qs) => qs.map((q, i) => (i === qi ? fn(q) : q)))
 
-  const create = async () => {
+  /* run=false saves the quiz and drops back to the dashboard without starting a
+     room; onCreated(null) already routes there. */
+  const create = async (run) => {
     if (!title.trim()) { setErr('Give the quiz a name so you can find it again'); return }
-    setErr(''); setBusy(true)
+    setErr(''); setBusy(run ? 'start' : 'save')
     try {
       onCreated(await createQuiz(token, {
         title: title.trim(),
@@ -340,11 +342,11 @@ function Builder({ token, initial, onCreated, onCancel, onAuthFail }) {
           code: q.code?.trim() ? q.code : null,     // omit the optional extras when unused
           image: q.image?.trim() ? q.image.trim() : null,
         })),
-      }))
+      }, run))
     } catch (e) {
       if (e instanceof AuthError) return onAuthFail()
       setErr(e.message)
-    } finally { setBusy(false) }
+    } finally { setBusy('') }
   }
 
   return (
@@ -468,7 +470,14 @@ function Builder({ token, initial, onCreated, onCancel, onAuthFail }) {
           className="rounded-xl bg-track px-5 py-3.5 font-extrabold hover:brightness-95">
           + Add question
         </button>
-        <Button onClick={create} disabled={busy}>{busy ? 'Creating…' : 'Create room'}</Button>
+        <Button onClick={() => create(false)} disabled={!!busy}>
+          {busy === 'save' ? 'Saving…' : 'Save for later'}
+        </Button>
+        <button onClick={() => create(true)} disabled={!!busy}
+          className="rounded-xl bg-track px-5 py-3.5 font-extrabold hover:brightness-95
+            disabled:opacity-60">
+          {busy === 'start' ? 'Creating…' : 'Save & start now'}
+        </button>
         {err && <span role="alert" className="font-semibold text-rose-ink">{err}</span>}
       </div>
     </div>

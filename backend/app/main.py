@@ -122,13 +122,15 @@ def login(req: LoginReq):
 
 
 @app.post("/api/quiz")
-def create_quiz(quiz: QuizIn, _: str = Depends(require_admin)):
+def create_quiz(quiz: QuizIn, run: bool = True, _: str = Depends(require_admin)):
+    """Save a quiz. With ?run=false that is all it does — no room is spawned, so
+    building a quiz never commits you to hosting it. `room_code` is then null."""
     questions = [q.model_dump() for q in quiz.questions]
-    code = manager.create(quiz.capacity, questions, quiz.title)
-    # creating a room is the save — no separate button to forget
+    # the save happens either way, and first: it must not depend on a room
     store.save_quiz(quiz.title, quiz.capacity, questions)
-    log.info("room %s created: %r (%d questions, cap %d)",
-             code, quiz.title, len(questions), quiz.capacity)
+    code = manager.create(quiz.capacity, questions, quiz.title) if run else None
+    log.info("quiz saved: %r (%d questions, cap %d)%s", quiz.title, len(questions),
+             quiz.capacity, f" — room {code}" if code else "")
     return {"room_code": code, "title": quiz.title}
 
 

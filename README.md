@@ -18,7 +18,10 @@ link the host console shows (with QR).
 
 1. Admin logs in → **dashboard** lists **your saved quizzes**, any game still
    running (which you can resume), and recent finished games → **New quiz**
-   builds one (name, capacity, per-question timer, correct option).
+   builds one (name, capacity, per-question timer, correct option). Finish with
+   **Save for later** — it lands on the dashboard and starts nothing — or
+   **Save & start now**, which also opens a room. Building a quiz never commits
+   you to hosting it, so you can prep the night before and run it in class.
 2. Host console shows the room code, join link + QR, and a live lobby where
    players bubble in as they join.
 3. Players open the link, enter a unique email, land in the lobby.
@@ -210,8 +213,9 @@ scoring.
 
 ## The dashboard
 
-One list, newest first. Every quiz you create is **kept automatically** under its
-name — there is no separate save step. Each row shows the name, question count,
+One list, newest first. Every quiz you build is **kept automatically** under its
+name — both builder buttons save, and neither needs a separate save step. Each
+row shows the name, question count,
 when it last ran, how many played and who won, with:
 
 - **Re-run** — starts a fresh room from the same questions

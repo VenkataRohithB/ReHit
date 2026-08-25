@@ -20,14 +20,16 @@ export async function login(username, password) {
   return r.json()          // { token, read_secs }
 }
 
-export async function createQuiz(token, quiz) {
-  const r = await authed(token, '/api/quiz', {
+/** Save a quiz. `run` false saves it without spawning a room, and resolves to
+ *  null instead of a room code. */
+export async function createQuiz(token, quiz, run = true) {
+  const r = await authed(token, `/api/quiz${run ? '' : '?run=false'}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(quiz),
   })
   if (!r.ok) {
-    let msg = 'Could not create the room'
+    let msg = run ? 'Could not create the room' : 'Could not save the quiz'
     try {
       const body = await r.json()
       msg = body.detail?.[0]?.msg || body.detail || msg

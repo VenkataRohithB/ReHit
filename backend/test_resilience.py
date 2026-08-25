@@ -31,6 +31,18 @@ def post(path, body, token=None):
     return json.load(urllib.request.urlopen(req))
 
 
+def get(path, token):
+    req = urllib.request.Request(
+        BASE + path, headers={"Authorization": "Bearer " + token})
+    return json.load(urllib.request.urlopen(req))
+
+
+def delete(path, token):
+    req = urllib.request.Request(
+        BASE + path, method="DELETE", headers={"Authorization": "Bearer " + token})
+    return json.load(urllib.request.urlopen(req))
+
+
 def new_room(token, n_players=10):
     return post("/api/quiz", {
         "title": "Resilience", "capacity": n_players,
@@ -163,9 +175,31 @@ async def check_answer_after_reconnect(token):
         await ws.close()
 
 
+def check_save_without_running(token):
+    """?run=false saves the quiz and spawns nothing. Building a quiz must never
+    commit the host to hosting it — and must never leave a joinable room behind."""
+    title = "Save-only check"
+    saved = post("/api/quiz?run=false", {
+        "title": title, "capacity": 5,
+        "questions": [{"text": "2+2?", "options": ["3", "4"], "correct": 1, "timer": 20}],
+    }, token)
+    assert saved["room_code"] is None, f"save-only spawned room {saved['room_code']}"
+
+    act = get("/api/activity", token)
+    assert title not in [r["title"] for r in act["live"]], "save-only left a live room"
+    row = next((r for r in act["rows"] if r["title"] == title), None)
+    assert row, "save-only did not save the quiz"
+
+    # tidy up after ourselves: saved quizzes roll off at SAVED_QUIZZES, so a
+    # check that leaves litter every run eventually evicts a real quiz
+    delete(f"/api/quizzes/{row['quiz_id']}", token)
+    print("  ok  save-only saved the quiz, spawned no room")
+
+
 async def main():
     token = post("/api/login", {"username": USER, "password": PASS})["token"]
     check_gzip()
+    check_save_without_running(token)
     code = new_room(token)
     await check_pong(code)
     await check_host_pong(code, token)
