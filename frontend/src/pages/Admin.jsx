@@ -4,7 +4,7 @@ import {
   login, createQuiz, downloadCsv, activity, savedQuiz, runSavedQuiz, deleteQuiz,
   wsUrl, AuthError,
 } from '../lib/api.js'
-import { parseQuiz, EXAMPLE } from '../lib/parseQuiz.js'
+import { parseQuiz, formatQuiz, EXAMPLE } from '../lib/parseQuiz.js'
 import { useSocket } from '../lib/useSocket.js'
 import {
   Screen, JoinStrip, Button, TimerRing, OptionKey, ResultBars, RaceBoard,
@@ -261,7 +261,9 @@ function TimerSplit({ total, read }) {
 
 /* ============================ bulk import ============================ */
 function BulkImport({ existing, onLoad, onClose }) {
-  const [text, setText] = useState('')
+  // opens holding whatever is already in the builder, so the whole quiz can be
+  // reworked as text in one go rather than a field at a time
+  const [text, setText] = useState(() => formatQuiz(existing))
   const parsed = text.trim() ? parseQuiz(text) : null
   const ready = parsed?.questions.length || 0
   const replacing = existing.filter((q) => q.text.trim()).length
@@ -269,7 +271,9 @@ function BulkImport({ existing, onLoad, onClose }) {
   return (
     <div className="mb-6 rounded-2xl border border-line p-5">
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-        <h2 className="font-extrabold">Paste questions</h2>
+        <h2 className="font-extrabold">
+          {replacing ? 'Edit questions as text' : 'Paste questions'}
+        </h2>
         <button onClick={onClose}
           className="text-sm font-semibold text-muted hover:text-ink">Close</button>
       </div>
@@ -336,12 +340,19 @@ function Builder({ token, initial, onCreated, onCancel, onAuthFail }) {
       onCreated(await createQuiz(token, {
         title: title.trim(),
         capacity: Number(capacity),
-        questions: questions.map((q) => ({
-          text: q.text.trim(), timer: Number(q.timer) || 20,
-          options: q.options.map((o) => o.trim()).filter(Boolean), correct: q.correct,
-          code: q.code?.trim() ? q.code : null,     // omit the optional extras when unused
-          image: q.image?.trim() ? q.image.trim() : null,
-        })),
+        questions: questions.map((q) => {
+          // dropping blank options shifts every index after them, so `correct`
+          // has to travel with its own option — otherwise a blank sitting above
+          // the right answer silently promotes the one below it
+          const kept = q.options.map((o, i) => ({ text: o.trim(), was: i })).filter((o) => o.text)
+          return {
+            text: q.text.trim(), timer: Number(q.timer) || 20,
+            options: kept.map((o) => o.text),
+            correct: kept.findIndex((o) => o.was === q.correct),
+            code: q.code?.trim() ? q.code : null,   // omit the optional extras when unused
+            image: q.image?.trim() ? q.image.trim() : null,
+          }
+        }),
       }, run))
     } catch (e) {
       if (e instanceof AuthError) return onAuthFail()
@@ -366,7 +377,7 @@ function Builder({ token, initial, onCreated, onCancel, onAuthFail }) {
           </label>
           <button onClick={() => setBulk((b) => !b)}
             className="rounded-xl bg-track px-4 py-2 text-sm font-extrabold hover:brightness-95">
-            Paste questions
+            {questions.some((q) => q.text.trim()) ? 'Edit all as text' : 'Paste questions'}
           </button>
           <button onClick={onCancel}
             className="rounded-xl px-3 py-2 text-sm font-semibold text-muted hover:text-ink">

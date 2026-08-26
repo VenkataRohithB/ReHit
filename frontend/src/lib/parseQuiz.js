@@ -224,6 +224,29 @@ function parseJson(input) {
   return { questions, errors }
 }
 
+/** The inverse of parseText: render questions back into the paste format, so a
+ *  whole quiz can be re-edited as text instead of field by field.
+ *  formatQuiz -> parseQuiz round-trips. */
+export function formatQuiz(questions) {
+  return (questions || [])
+    .filter((q) => (q.text || '').trim())
+    .map((q) => {
+      const out = [`${q.text.trim()} [${Number(q.timer) || DEFAULT_TIMER}]`]
+      if ((q.code || '').trim()) {
+        out.push('```', ...String(q.code).replace(/\s+$/, '').split(/\r?\n/), '```')
+      }
+      if ((q.image || '').trim()) out.push(`!${String(q.image).trim()}`)
+      // blank options are dropped here, so `correct` is matched on the ORIGINAL
+      // index — using the shifted one silently marks a different answer correct
+      q.options
+        .map((o, i) => ({ text: (o || '').trim(), correct: i === q.correct }))
+        .filter((o) => o.text)
+        .forEach((o) => out.push(`${o.correct ? '*' : '-'} ${o.text}`))
+      return out.join('\n')
+    })
+    .join('\n\n')
+}
+
 export function parseQuiz(input) {
   const text = (input || '').trim()
   if (!text) return { questions: [], errors: [err(1, 'Nothing to import — paste some questions first')] }

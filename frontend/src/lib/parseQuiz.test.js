@@ -2,7 +2,7 @@
      cd frontend && npm test                (or: node --test src/lib) */
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { parseQuiz, EXAMPLE, DEFAULT_TIMER } from './parseQuiz.js'
+import { parseQuiz, formatQuiz, EXAMPLE, DEFAULT_TIMER } from './parseQuiz.js'
 
 test('parses the documented example', () => {
   const { questions, errors } = parseQuiz(EXAMPLE)
@@ -145,4 +145,39 @@ test('explains broken JSON instead of throwing', () => {
 
 test('empty input asks for questions rather than erroring blankly', () => {
   assert.match(parseQuiz('   ').errors[0].msg, /paste some questions/i)
+})
+
+test('formatQuiz round-trips back through the parser', () => {
+  const { questions } = parseQuiz(EXAMPLE)
+  const again = parseQuiz(formatQuiz(questions))
+  assert.deepEqual(again.errors, [])
+  assert.deepEqual(again.questions, questions, 'a round trip changed the quiz')
+})
+
+test('round trip survives a code fence and an image', () => {
+  const src = [
+    'What does this print? [30]',
+    '```',
+    'xs = [1, 2, 3]',
+    '- not an option, this is code',
+    'print(xs[-1])',
+    '```',
+    '!https://example.com/a.png',
+    '* 3',
+    '- 1',
+  ].join('\n')
+  const first = parseQuiz(src).questions
+  assert.equal(first.length, 1)
+  assert.equal(first[0].timer, 30)
+  assert.match(first[0].code, /not an option/)
+  assert.deepEqual(parseQuiz(formatQuiz(first)).questions, first)
+})
+
+test('a blank option above the answer does not move which one is correct', () => {
+  // builder state: someone cleared option 1, and option 2 is the right answer
+  const built = [{ text: 'Capital of France?', timer: '20',
+                   options: ['', 'Paris', 'Rome'], correct: 1 }]
+  const out = parseQuiz(formatQuiz(built)).questions[0]
+  assert.deepEqual(out.options, ['Paris', 'Rome'])
+  assert.equal(out.options[out.correct], 'Paris', 'the wrong option got marked correct')
 })
