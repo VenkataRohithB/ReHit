@@ -206,8 +206,8 @@ scoring.
 | `ADVANCE_TIMEOUT_SECS` | `900` | backstop only — if the host abandons the game, the room continues after this so it can finish and be reaped |
 | `ROOM_TTL_SECS` | `3600` | reap ended / abandoned rooms from memory after this |
 | `DB_PATH` | `quiz.db` | sqlite file holding saved quizzes and game history |
-| `HISTORY_LIMIT` | `10` | finished games kept (and listed); older ones roll off with their CSV |
-| `SAVED_QUIZZES` | `10` | saved quiz definitions kept; oldest-used roll off |
+| `HISTORY_LIMIT` | `200` | finished games kept (and listed); older ones roll off with their CSV |
+| `SAVED_QUIZZES` | `200` | saved quiz definitions kept; oldest-used roll off, **taking their questions with them** |
 | `MAX_QUESTIONS` / `MAX_OPTIONS` / `MAX_CAPACITY` / `MAX_TIMER` | `50` / `6` / `1000` / `300` | validation bounds |
 | `CORS_ORIGINS` | `*` | comma-separated allowed origins |
 
@@ -239,10 +239,15 @@ holds the things worth keeping: **saved quizzes** and **finished games**, so the
 dashboard and old CSV downloads survive a restart. Compose mounts a `quiz-data`
 volume for the database.
 
-Both tables **roll over**: only the 10 most recent are kept (`SAVED_QUIZZES` and
-`HISTORY_LIMIT`), so the file never grows without bound. Note that a game rolling
-off history takes its CSV with it — raise `HISTORY_LIMIT` if you need results kept
-for longer.
+Both tables **roll over**: only the 200 most recent are kept (`SAVED_QUIZZES` and
+`HISTORY_LIMIT`), so the file never grows without bound.
+
+Rolling off is a real delete, and quietly asymmetric on the dashboard: a game
+rolling off history takes its CSV with it, and a **quiz** rolling off takes its
+questions. The dashboard row survives either way — so the quiz still *looks*
+listed and its CSV still downloads — but **Re-run** disappears, because there is
+nothing left to run. These limits were 10 each, which is low enough to lose a
+quiz you were still using; keep them well above however many you build.
 
 ## Scaling note
 

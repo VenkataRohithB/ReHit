@@ -60,7 +60,8 @@ def test_history_rolls_over_too():
         # stamp in the past so these cannot outrank rooms saved by later tests
         r.code, r.ended_at = f"R{n:04d}", time.time() - 1000 + n
         store.save(r, "email,score\n", [])
-    kept = store.recent(100)
+    # ask for more than the limit keeps, or this asserts against the page size
+    kept = store.recent(settings.history_limit + 5)
     assert len(kept) == settings.history_limit, len(kept)
     assert kept[0]["code"] == f"R{settings.history_limit + 4:04d}", "newest first"
 

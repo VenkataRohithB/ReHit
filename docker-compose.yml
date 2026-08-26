@@ -11,8 +11,9 @@ services:
       ADVANCE_TIMEOUT_SECS: "900"   # backstop if a host abandons a game
       ROOM_TTL_SECS: "3600"
       DB_PATH: /data/quiz.db    # saved quizzes + game history (backend/app/store.py)
-      HISTORY_LIMIT: "10"       # finished games kept; older roll off with their CSV
-      SAVED_QUIZZES: "10"       # reusable quiz definitions kept
+      HISTORY_LIMIT: "200"      # finished games kept; older roll off with their CSV
+      SAVED_QUIZZES: "200"      # reusable quiz definitions kept — rolling off DELETES
+                                # the questions, so keep this well above what you build
     volumes:
       - quiz-data:/data         # history survives rebuilds and restarts
     restart: unless-stopped
