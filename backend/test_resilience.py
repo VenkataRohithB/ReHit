@@ -98,6 +98,42 @@ async def check_host_pong(code, token):
     print("  ok  host ping -> pong")
 
 
+async def check_clock_is_universal(token):
+    """One clock for the whole room, and losing the network must not bend it.
+
+    The question deadline lives on the server, so a phone that drops out and
+    comes back has to be handed the same remaining time everyone else is seeing —
+    no credit for being offline, and no penalty either. A client that reconnects
+    and is told a *fresh* window would be handing that student extra seconds.
+    """
+    code = new_room(token)
+    a, b = [await join(code, f"{n}@clock.edu") for n in "ab"]
+    host = await websockets.connect(f"{WS}/ws/host/{code}?token={token}")
+    await host.send('{"type":"start"}')
+
+    for ws in (a, b):
+        while True:
+            m = await recv_until(ws, "question")
+            if m["phase"] == "answering":
+                break
+    opened, window = time.time(), m["remaining"]
+
+    await a.close()                        # loses wifi mid-question
+    await asyncio.sleep(3)
+    a2 = await join(code, "a@clock.edu")   # ...and comes back
+    back = await recv_until(a2, "question")
+
+    expected = window - (time.time() - opened)
+    drift = back["remaining"] - expected
+    assert back["phase"] == "answering", "reconnect landed on the wrong phase"
+    assert abs(drift) < 1.0, f"reconnect clock drifted {drift:+.2f}s from the room's"
+    assert back["remaining"] < window, "reconnecting handed out a fresh window"
+    print(f"  ok  clock survived a drop ({drift:+.2f}s drift, no fresh window)")
+
+    for ws in (a2, b, host):
+        await ws.close()
+
+
 async def check_no_early_close_on_drop(token):
     """THE PILOT BUG. Two players answer, a third drops without answering.
 
@@ -203,6 +239,7 @@ async def main():
     code = new_room(token)
     await check_pong(code)
     await check_host_pong(code, token)
+    await check_clock_is_universal(token)
     await check_no_early_close_on_drop(token)
     await check_early_close_still_works(token)
     await check_answer_after_reconnect(token)

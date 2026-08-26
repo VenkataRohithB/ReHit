@@ -181,15 +181,32 @@ export function Button({ children, className = '', ...props }) {
    on any device whose clock was off — a phone a few seconds fast would hit zero
    early and then just sit there. Only local deltas are used here, so skew cannot
    affect it. `key` restarts the countdown on each new question. */
+/** The question clock is the server's, and every device must show the same
+ *  number no matter what its network or its browser did in between.
+ *
+ *  So: anchor a deadline once from the server's `remaining` and render the gap
+ *  to it. A phone that locks, backgrounds, or drops wifi has its timers
+ *  throttled or frozen by the browser — but wall-clock arithmetic against a
+ *  fixed deadline is still right when it wakes up, where a per-tick decrement
+ *  would have silently fallen behind and then had to race to catch up. That
+ *  race is what looked like the clock running fast; it never was. */
 export function useCountdown(remaining, total, key) {
   const [left, setLeft] = useState(remaining ?? total)
   useEffect(() => {
     if (remaining == null) { setLeft(total); return }
-    const start = Date.now()
-    const tick = () => setLeft(Math.max(0, remaining - (Date.now() - start) / 1000))
+    const ends = Date.now() + remaining * 1000
+    const tick = () => setLeft(Math.max(0, (ends - Date.now()) / 1000))
     tick()
     const id = setInterval(tick, 100)
-    return () => clearInterval(id)
+    // a throttled tab can be many seconds stale; resync the instant it is looked
+    // at again rather than waiting on the next interval that may never come
+    document.addEventListener('visibilitychange', tick)
+    window.addEventListener('focus', tick)
+    return () => {
+      clearInterval(id)
+      document.removeEventListener('visibilitychange', tick)
+      window.removeEventListener('focus', tick)
+    }
   }, [remaining, total, key])
   return left
 }
@@ -200,10 +217,16 @@ export function TimerBar({ remaining, total, qkey }) {
   const left = useCountdown(remaining, total, qkey)
   const frac = total ? Math.max(0, Math.min(1, left / total)) : 1
   const colour = left <= 5 ? 'bg-danger' : left <= 8 ? 'bg-warn' : 'bg-anchor'
+  // A correction bigger than a tick means the tab was frozen and we are catching
+  // up. Animating that slides the bar across the screen and reads as the clock
+  // sprinting; jump straight to the truth instead.
+  const prev = useRef(left)
+  const caughtUp = Math.abs(prev.current - left) > 1
+  prev.current = left
   return (
     <div className="relative h-2 flex-none overflow-hidden rounded-full bg-track">
-      <div className={`h-full rounded-full transition-[transform,background-color] duration-100
-        ease-linear ${colour}`}
+      <div className={`h-full rounded-full ${caughtUp ? '' : `transition-[transform,background-color]
+        duration-100 ease-linear`} ${colour}`}
         style={{ transform: `scaleX(${frac})`, transformOrigin: 'left center' }} />
       {left > 0 && !still() && (
         <div className="pointer-events-none absolute inset-y-0 w-1/3 animate-[shimmer_1.6s_linear_infinite]
