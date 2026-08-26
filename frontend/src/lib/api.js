@@ -39,6 +39,14 @@ export async function createQuiz(token, quiz, run = true) {
   return (await r.json()).room_code
 }
 
+/** What a joiner needs before being asked for anything: which kind of name this
+ *  room wants, and whether it exists. Unauthenticated — players have no token. */
+export async function roomInfo(code) {
+  const r = await fetch(`/api/room/${encodeURIComponent(code)}`)
+  if (!r.ok) throw new Error('Room not found')
+  return r.json()
+}
+
 /** Dashboard feed: live rooms + one row per quiz. Names and counts only —
  *  question content never crosses the wire. */
 export async function activity(token) {

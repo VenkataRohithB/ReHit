@@ -59,7 +59,7 @@ const MAX_CODE = 2000
 const err = (line, msg) => ({ line, msg })
 
 /** Validate one assembled question; returns an array of errors (empty if fine). */
-function checkQuestion(q, errors) {
+function checkQuestion(q, errors, graded) {
   if (q.options.length < 2) {
     errors.push(err(q.line, `"${trunc(q.text)}" needs at least 2 options`))
     return false
@@ -68,7 +68,9 @@ function checkQuestion(q, errors) {
     errors.push(err(q.line, `"${trunc(q.text)}" has ${q.options.length} options — the maximum is ${MAX_OPTIONS}`))
     return false
   }
-  if (q.correct == null) {
+  // a poll has no answer key. Still an error for a graded quiz, though: silently
+  // accepting an unmarked question would make it unanswerable at run time.
+  if (graded && q.correct == null) {
     errors.push(err(q.line, `"${trunc(q.text)}" has no correct answer — mark one option with *`))
     return false
   }
@@ -103,14 +105,14 @@ const clean = (q) => {
   return out
 }
 
-function parseText(input) {
+function parseText(input, graded) {
   const questions = []
   const errors = []
   let cur = null
   let fencedAt = 0        // line the open ``` sits on, 0 when not inside a block
 
   const flush = () => {
-    if (cur && checkQuestion(cur, errors)) questions.push(clean(cur))
+    if (cur && checkQuestion(cur, errors, graded)) questions.push(clean(cur))
     cur = null
   }
 
@@ -182,7 +184,7 @@ function parseText(input) {
   return { questions, errors }
 }
 
-function parseJson(input) {
+function parseJson(input, graded) {
   const errors = []
   let data
   try {
@@ -208,18 +210,23 @@ function parseJson(input) {
       const hit = options.findIndex((o) => o.toLowerCase() === correct.trim().toLowerCase())
       correct = hit < 0 ? null : hit
     }
-    if (typeof correct !== 'number' || !Number.isInteger(correct) || correct < 0 || correct >= options.length) {
-      errors.push(err(at, `Question ${at} ("${trunc(text)}") has no valid correct answer`))
-      return
+    const validCorrect = typeof correct === 'number' && Number.isInteger(correct) &&
+      correct >= 0 && correct < options.length
+    if (!validCorrect) {
+      if (graded) {
+        errors.push(err(at, `Question ${at} ("${trunc(text)}") has no valid correct answer`))
+        return
+      }
+      correct = null            // a poll question simply has no answer key
     }
     const codeStr = typeof raw?.code === 'string' ? raw.code.replace(/\s+$/, '') : ''
     const q = {
-      text, options, correct, correctCount: 1,
+      text, options, correct, correctCount: correct == null ? 0 : 1,
       timer: Number(raw?.timer) || DEFAULT_TIMER, line: at,
       code: codeStr ? codeStr.split('\n') : [],
       image: typeof raw?.image === 'string' && raw.image.trim() ? raw.image.trim() : null,
     }
-    if (checkQuestion(q, errors)) questions.push(clean(q))
+    if (checkQuestion(q, errors, graded)) questions.push(clean(q))
   })
   return { questions, errors }
 }
@@ -239,7 +246,7 @@ export function formatQuiz(questions) {
       // blank options are dropped here, so `correct` is matched on the ORIGINAL
       // index — using the shifted one silently marks a different answer correct
       q.options
-        .map((o, i) => ({ text: (o || '').trim(), correct: i === q.correct }))
+        .map((o, i) => ({ text: (o || '').trim(), correct: q.correct != null && i === q.correct }))
         .filter((o) => o.text)
         .forEach((o) => out.push(`${o.correct ? '*' : '-'} ${o.text}`))
       return out.join('\n')
@@ -247,11 +254,12 @@ export function formatQuiz(questions) {
     .join('\n\n')
 }
 
-export function parseQuiz(input) {
+export function parseQuiz(input, graded = true) {
   const text = (input || '').trim()
   if (!text) return { questions: [], errors: [err(1, 'Nothing to import — paste some questions first')] }
 
-  const { questions, errors } = /^[[{]/.test(text) ? parseJson(text) : parseText(text)
+  const { questions, errors } = /^[[{]/.test(text)
+    ? parseJson(text, graded) : parseText(text, graded)
 
   if (questions.length > MAX_QUESTIONS) {
     return {

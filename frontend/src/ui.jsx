@@ -53,12 +53,16 @@ export function Ticker({ to, ms = 900, suffix = '', className = '' }) {
   useEffect(() => {
     const el = ref.current
     if (!el) return
-    if (still()) { el.textContent = to.toLocaleString() + suffix; return }
+    // a payload that omits the number (an unscored quiz) must not crash the page,
+    // and this branch only runs under prefers-reduced-motion — so a raw `to` would
+    // throw for exactly the people least able to work around it
+    const n = Number(to) || 0
+    if (still()) { el.textContent = n.toLocaleString() + suffix; return }
     const t0 = performance.now()
     let raf
     const step = (t) => {
       const k = Math.min(1, (t - t0) / ms)
-      el.textContent = Math.round(to * (1 - Math.pow(1 - k, 3))).toLocaleString() + suffix
+      el.textContent = Math.round(n * (1 - Math.pow(1 - k, 3))).toLocaleString() + suffix
       if (k < 1) raf = requestAnimationFrame(step)
     }
     raf = requestAnimationFrame(step)
@@ -71,7 +75,7 @@ export function Ticker({ to, ms = 900, suffix = '', className = '' }) {
 const EMOJI = ['🦊', '🐼', '🦉', '🐙', '🦁', '🐸', '🦄', '🐝', '🐳', '🦋', '🐢', '🦖',
   '🐧', '🦩', '🐰', '🦔', '🐨', '🦜', '🐺', '🐬']
 const hash = (s) => { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0; return Math.abs(h) }
-export const faceOf = (email) => EMOJI[hash(email) % EMOJI.length]
+export const faceOf = (name) => EMOJI[hash(name) % EMOJI.length]
 
 /** Lobby: pastel capsules that pop in as people join, then breathe in place.
  *
@@ -88,7 +92,7 @@ export const faceOf = (email) => EMOJI[hash(email) % EMOJI.length]
  *  is the real number; these are the last few faces through the door.
  *
  *  Everything varying per person (hue, float speed, phase) is derived from a hash
- *  of the email, so a face and its rhythm never change mid-lobby. */
+ *  of their name, so a face and its rhythm never change mid-lobby. */
 const RECENT_SHOWN = 30
 
 export function LobbyPills({ players }) {
@@ -105,19 +109,19 @@ export function LobbyPills({ players }) {
           +{hidden} more
         </span>
       )}
-      {shown.map((email) => {
-        const h = hash(email)
+      {shown.map((name) => {
+        const h = hash(name)
         const t = TONES[h % TONES.length]
         return (
-          <span key={email} style={{
+          <span key={name} style={{
             fontSize: size,
             '--bob': `${3.2 + (h >> 5) % 26 / 10}s`,      // 3.2s–5.7s
             '--bob-delay': `-${(h >> 11) % 40 / 10}s`,    // negative: already mid-cycle
           }}
             className={`anim-join flex items-center gap-1.5 whitespace-nowrap rounded-full
               px-3 py-1.5 font-bold leading-none ${t.fill} ${t.ink}`}>
-            <span style={{ fontSize: '1.45em' }}>{faceOf(email)}</span>
-            {email.split('@')[0]}
+            <span style={{ fontSize: '1.45em' }}>{faceOf(name)}</span>
+            {name.split('@')[0]}
           </span>
         )
       })}
@@ -211,6 +215,38 @@ export function useCountdown(remaining, total, key) {
   return left
 }
 
+/** Count-UP for a host-closed question, which has no deadline to count down to.
+ *
+ *  Anchors the start and renders the gap forward — the same wall-clock trick as
+ *  useCountdown, so a phone that locked or backgrounded wakes showing the truth
+ *  instead of a stale tick count. Whole seconds, so 250ms is plenty.
+ *
+ *  A sibling rather than a mode on useCountdown: that one is load-bearing and
+ *  carries hard-won behaviour, and one hook serving both directions would be an
+ *  abstraction over two things that only look alike. */
+export function useStopwatch(elapsed, key) {
+  const [secs, setSecs] = useState(0)
+  useEffect(() => {
+    if (elapsed == null) { setSecs(0); return }
+    const began = Date.now() - elapsed * 1000
+    const tick = () => setSecs(Math.max(0, (Date.now() - began) / 1000))
+    tick()
+    const id = setInterval(tick, 250)
+    document.addEventListener('visibilitychange', tick)
+    window.addEventListener('focus', tick)
+    return () => {
+      clearInterval(id)
+      document.removeEventListener('visibilitychange', tick)
+      window.removeEventListener('focus', tick)
+    }
+  }, [elapsed, key])
+  return secs
+}
+
+/** m:ss for a stopwatch that may run for a while. */
+export const clock = (s) =>
+  `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`
+
 /* Phone timer: the ring's urgency language on a bar, which costs less of the
    vertical space the answer tiles need. Blue → amber → rose, then a shimmer. */
 export function TimerBar({ remaining, total, qkey }) {
@@ -302,8 +338,10 @@ export function ResultBars({ tally, options, correct, settleMs = 1500 }) {
       {options.map((opt, i) => {
         const t = tone(i)
         const pct = Math.round((tally[i] / total) * 100)
-        const right = i === correct
-        const dim = settled && !right
+        // a poll has no answer key: nothing is right, so nothing dims and the bars
+        // stay in full colour showing the distribution, which is the whole point
+        const right = correct != null && i === correct
+        const dim = settled && correct != null && !right
         return (
           <div key={i}
             className={`relative flex items-center overflow-hidden rounded-2xl bg-track
@@ -345,8 +383,11 @@ function Arrow({ d }) {
 }
 
 function Row({ p, i, me, compact, refFn }) {
-  const medal = i < 3 ? RANKS[i] : 'bg-track'
-  const pill = i < 3 ? RANK_PILL[i] : 'bg-white text-muted'
+  // the server sends a dense rank — tied scores share it — so the medal and the
+  // number come from that, while the stagger stays keyed to screen position
+  const r = (p.rank ?? i + 1) - 1
+  const medal = r < 3 ? RANKS[r] : 'bg-track'
+  const pill = r < 3 ? RANK_PILL[r] : 'bg-white text-muted'
   const moved = !!p.delta
   return (
     <div ref={refFn}
@@ -355,8 +396,8 @@ function Row({ p, i, me, compact, refFn }) {
       ${me ? 'ring-2 ring-inset ring-anchor' : ''}`}
       style={moved ? undefined : { animationDelay: `${i * 28}ms` }}>
       <span className={`grid aspect-square w-[1.9em] flex-none place-items-center rounded-full
-        text-[.78em] font-extrabold tabular-nums ${pill}`}>{i + 1}</span>
-      <span className="flex-1 truncate font-semibold">{p.email}</span>
+        text-[.78em] font-extrabold tabular-nums ${pill}`}>{r + 1}</span>
+      <span className="flex-1 truncate font-semibold">{p.name}</span>
       {!compact && <Arrow d={p.delta} />}
       <span className="min-w-[3.4em] text-right text-[1.05em] font-extrabold tabular-nums">{p.score}</span>
     </div>
@@ -377,7 +418,7 @@ function useOvertakes(rows) {
     if (!first) return
     const pitch = first.offsetHeight + 6            // row height + gap-1.5
     for (const p of rows) {
-      const el = refs.current.get(p.email)
+      const el = refs.current.get(p.name)
       if (!el || !p.delta) continue
       el.animate(
         [{ transform: `translateY(${p.delta * pitch}px)`, opacity: 0.55 },
@@ -386,18 +427,18 @@ function useOvertakes(rows) {
       )
     }
   }, [rows])
-  return (email) => (el) => { el ? refs.current.set(email, el) : refs.current.delete(email) }
+  return (name) => (el) => { el ? refs.current.set(name, el) : refs.current.delete(name) }
 }
 
 /* Top 15 in two columns — a projected board that scrolls is a broken board. */
-export function Leaderboard({ rows, meEmail, compact = false }) {
+export function Leaderboard({ rows, meName, compact = false }) {
   const bind = useOvertakes(rows || [])
   if (!rows?.length) return <p className="text-center text-muted">No scores yet.</p>
   if (compact) {
     return (
       <div className="flex flex-1 flex-col justify-center gap-2">
         {rows.map((p, i) => (
-          <Row key={p.email} p={p} i={i} me={p.email === meEmail} compact refFn={bind(p.email)} />
+          <Row key={p.name} p={p} i={i} me={p.name === meName} compact refFn={bind(p.name)} />
         ))}
       </div>
     )
@@ -406,7 +447,7 @@ export function Leaderboard({ rows, meEmail, compact = false }) {
   const col = (slice, offset) => (
     <div className="flex flex-col gap-1.5">
       {slice.map((p, i) => (
-        <Row key={p.email} p={p} i={i + offset} me={p.email === meEmail} refFn={bind(p.email)} />
+        <Row key={p.name} p={p} i={i + offset} me={p.name === meName} refFn={bind(p.name)} />
       ))}
     </div>
   )
@@ -422,9 +463,11 @@ export function Leaderboard({ rows, meEmail, compact = false }) {
    Rows first appear in their PREVIOUS order (recovered from each row's delta) and
    race out as bars; then they travel to their new positions with a FLIP. One set
    of elements does both, which is what makes the movement readable. */
-export function RaceBoard({ rows, meEmail, raceMs = 1900 }) {
+export function RaceBoard({ rows, meName, raceMs = 1900 }) {
+  // recover the previous order from each row's rank and its delta. Must use the
+  // rank, not the array index — with ties they are no longer the same number.
   const prevOrder = (list) =>
-    list.map((r, i) => ({ r, was: i + (r.delta || 0) }))
+    list.map((r, i) => ({ r, was: (r.rank ?? i + 1) - 1 + (r.delta || 0) }))
       .sort((a, b) => a.was - b.was).map((x) => x.r)
 
   const [order, setOrder] = useState(() => (still() ? rows : prevOrder(rows)))
@@ -452,20 +495,20 @@ export function RaceBoard({ rows, meEmail, raceMs = 1900 }) {
   })
 
   const max = Math.max(...rows.map((r) => r.score), 1)
-  const rankOf = new Map(rows.map((r, i) => [r.email, i]))
+  const rankOf = new Map(rows.map((r, i) => [r.name, (r.rank ?? i + 1) - 1]))
 
   const row = (p) => {
-    const i = rankOf.get(p.email)
+    const i = rankOf.get(p.name)
     const medal = i < 3 ? RANKS[i] : 'bg-track'
     const pill = i < 3 ? RANK_PILL[i] : 'bg-white text-muted'
     /* only the podium is tinted — giving every row its own hue turned the board
        into a rainbow and made the medal colours meaningless */
     const fill = i < 3 ? RANK_FILL[i] : 'bg-ink/[.07]'
     return (
-      <div key={p.email} ref={(el) => el ? els.current.set(p.email, el) : els.current.delete(p.email)}
+      <div key={p.name} ref={(el) => el ? els.current.set(p.name, el) : els.current.delete(p.name)}
         className={`relative flex items-center gap-3 overflow-hidden rounded-xl ${medal}
           px-3 py-[.4rem] text-[clamp(.7rem,1.05vw,.95rem)]
-          ${p.email === meEmail ? 'ring-2 ring-inset ring-anchor' : ''}`}>
+          ${p.name === meName ? 'ring-2 ring-inset ring-anchor' : ''}`}>
         <div className={`absolute inset-y-0 left-0 ${fill}`}
           style={{
             width: `${(p.score / max) * 100}%`,
@@ -473,7 +516,7 @@ export function RaceBoard({ rows, meEmail, raceMs = 1900 }) {
           }} />
         <span className={`relative z-10 grid aspect-square w-[1.9em] flex-none place-items-center
           rounded-full text-[.78em] font-extrabold tabular-nums ${pill}`}>{i + 1}</span>
-        <span className="relative z-10 flex-1 truncate font-semibold">{p.email}</span>
+        <span className="relative z-10 flex-1 truncate font-semibold">{p.name}</span>
         <Arrow d={p.delta} />
         <span className="relative z-10 min-w-[3.2em] text-right text-[1.05em] font-extrabold">
           <Ticker to={p.score} ms={900} />
@@ -492,11 +535,25 @@ export function RaceBoard({ rows, meEmail, raceMs = 1900 }) {
   )
 }
 
+/** Group an already-sorted board into at most `n` steps, one per distinct score.
+ *  Level scores finish level, so a step can hold more than one person and a
+ *  two-way tie for first means there is no second step at all. */
+function topSteps(rows, n = 3) {
+  const steps = []
+  for (const r of rows || []) {
+    const last = steps[steps.length - 1]
+    if (last && last[0].score === r.score) last.push(r)
+    else if (steps.length < n) steps.push([r])
+    else break
+  }
+  return steps
+}
+
 /* The finale: 3rd, 2nd, then a held beat before 1st lands with confetti — and
    then the podium settles in underneath, deliberately without a second burst. */
 export function WinnerFinale({ rows, totalPlayers, stepMs = 1800 }) {
   const host = useRef(null)
-  const top3 = rows.slice(0, 3)
+  const top3 = topSteps(rows)             // each step is everyone on that score
   const [step, setStep] = useState(still() ? 3 : -1)
 
   useEffect(() => {
@@ -521,18 +578,28 @@ export function WinnerFinale({ rows, totalPlayers, stepMs = 1800 }) {
           {w && (
             <>
               <div className={`anim-pop text-[clamp(1.6rem,4.6vw,4rem)] font-extrabold
-                tracking-tight ${tone(idx).ink}`}>{LABEL[idx]}</div>
-              <div className="anim-floatin flex items-center gap-4">
-                <span className={`grid aspect-square w-[clamp(3rem,7vw,6rem)] place-items-center
-                  rounded-full text-[clamp(1.5rem,3.4vw,3rem)] ${tone(idx).fill}`}>
-                  {faceOf(w.email)}
-                </span>
-                <span className="text-[clamp(1.4rem,3.6vw,3rem)] font-extrabold">
-                  {w.email.split('@')[0]}
-                </span>
+                tracking-tight ${tone(idx).ink}`}>
+                {LABEL[idx]}{w.length > 1 && <span className="font-bold"> — a {w.length}-way tie</span>}
+              </div>
+              <div className="anim-floatin flex flex-wrap items-center justify-center
+                gap-x-[clamp(1rem,3vw,2.5rem)] gap-y-3">
+                {w.map((p) => (
+                  <span key={p.name} className="flex items-center gap-4">
+                    <span className={`grid aspect-square place-items-center rounded-full
+                      ${tone(idx).fill} ${w.length > 1
+                        ? 'w-[clamp(2.2rem,4.6vw,3.8rem)] text-[clamp(1.1rem,2.2vw,1.9rem)]'
+                        : 'w-[clamp(3rem,7vw,6rem)] text-[clamp(1.5rem,3.4vw,3rem)]'}`}>
+                      {faceOf(p.name)}
+                    </span>
+                    <span className={`font-extrabold ${w.length > 1
+                      ? 'text-[clamp(1rem,2.3vw,1.9rem)]' : 'text-[clamp(1.4rem,3.6vw,3rem)]'}`}>
+                      {p.name.split('@')[0]}
+                    </span>
+                  </span>
+                ))}
               </div>
               <div className={`text-[clamp(1.1rem,2.4vw,2rem)] font-extrabold ${tone(idx).ink}`}>
-                <Ticker to={w.score} ms={700} />
+                <Ticker to={w[0].score} ms={700} />
               </div>
             </>
           )}
@@ -559,11 +626,13 @@ const POD = [
 ]
 
 export function Podium({ rows }) {
+  const steps = topSteps(rows)
   return (
     <div className="flex flex-1 items-end justify-center gap-[clamp(.6rem,2vw,2rem)]">
       {POD.map(({ i, h, fill, ink, delay }) => {
-        const p = rows[i]
-        if (!p) return <div key={i} className="w-[20%] max-w-48" />
+        const g = steps[i]
+        if (!g) return <div key={i} className="w-[20%] max-w-48" />
+        const many = g.length > 1
         return (
           <div key={i} className="relative flex w-[20%] max-w-48 flex-col items-center gap-2">
             {i === 0 && (
@@ -571,12 +640,19 @@ export function Podium({ rows }) {
                 text-[clamp(1.2rem,2.8vw,2.4rem)]"
                 style={{ animationDelay: '540ms' }}>👑</div>
             )}
-            <div className={`grid aspect-square w-[clamp(2.2rem,5vw,4.4rem)] place-items-center
-              rounded-full text-[clamp(1.1rem,2.6vw,2.2rem)] ${fill}`}>
-              {faceOf(p.email)}
+            <div className="flex flex-wrap items-end justify-center gap-1">
+              {g.map((p) => (
+                <div key={p.name} className={`grid aspect-square place-items-center rounded-full
+                  ${fill} ${many ? 'w-[clamp(1.4rem,3vw,2.6rem)] text-[clamp(.7rem,1.5vw,1.3rem)]'
+                    : 'w-[clamp(2.2rem,5vw,4.4rem)] text-[clamp(1.1rem,2.6vw,2.2rem)]'}`}>
+                  {faceOf(p.name)}
+                </div>
+              ))}
             </div>
-            <div className="max-w-full truncate text-[clamp(.65rem,1.2vw,1.1rem)] text-muted">{p.email}</div>
-            <div className="text-[clamp(1rem,2vw,2rem)] font-extrabold tabular-nums">{p.score}</div>
+            <div className="max-w-full truncate text-[clamp(.65rem,1.2vw,1.1rem)] text-muted">
+              {g.map((p) => p.name.split('@')[0]).join(', ')}
+            </div>
+            <div className="text-[clamp(1rem,2vw,2rem)] font-extrabold tabular-nums">{g[0].score}</div>
             <div className={`anim-rise grid w-full place-items-center rounded-t-2xl
               text-[clamp(1.1rem,2.2vw,2.2rem)] font-extrabold ${h} ${fill} ${ink}`}
               style={{ animationDelay: `${delay}ms` }}>{i + 1}</div>

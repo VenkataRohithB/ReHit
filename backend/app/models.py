@@ -4,6 +4,7 @@ import re
 from pydantic import BaseModel, field_validator, model_validator
 
 from .config import settings
+from .game import clean_mode
 
 
 class LoginReq(BaseModel):
@@ -14,7 +15,7 @@ class LoginReq(BaseModel):
 class QuestionIn(BaseModel):
     text: str
     options: list[str]
-    correct: int
+    correct: int | None = None   # a poll has no answer key
     timer: int = 20
     code: str | None = None    # optional snippet shown above the options
     image: str | None = None   # optional illustration, by URL
@@ -71,7 +72,7 @@ class QuestionIn(BaseModel):
 
     @model_validator(mode="after")
     def _correct_in_range(self):
-        if not (0 <= self.correct < len(self.options)):
+        if self.correct is not None and not (0 <= self.correct < len(self.options)):
             raise ValueError("correct index out of range")
         return self
 
@@ -80,6 +81,14 @@ class QuizIn(BaseModel):
     title: str
     capacity: int
     questions: list[QuestionIn]
+    mode: dict = {}              # the six per-quiz switches; see game.MODES
+
+    @field_validator("mode")
+    @classmethod
+    def _mode(cls, v):
+        # clean_mode drops unknown keys and falls back to today's behaviour, so a
+        # stale client cannot post a switch we do not have
+        return clean_mode(v)
 
     @field_validator("title")
     @classmethod

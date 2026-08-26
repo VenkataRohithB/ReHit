@@ -30,9 +30,10 @@ CREATE TABLE IF NOT EXISTS quizzes (
   id        INTEGER PRIMARY KEY AUTOINCREMENT,
   title     TEXT NOT NULL UNIQUE,   -- same title replaces: one entry per named quiz
   capacity  INTEGER NOT NULL,
-  questions TEXT NOT NULL,          -- json, exactly what /api/quiz accepts
+  questions TEXT NOT NULL,          -- json ARRAY — quiz_summaries counts it in SQL
   created   REAL NOT NULL,
-  used      REAL NOT NULL
+  used      REAL NOT NULL,
+  mode      TEXT NOT NULL DEFAULT '{}'   -- json, the six per-quiz switches
 );
 CREATE INDEX IF NOT EXISTS quizzes_used ON quizzes(used DESC);
 """
@@ -59,6 +60,11 @@ def init():
         cols = {r["name"] for r in c.execute("PRAGMA table_info(rooms)")}
         if "title" not in cols:
             c.execute("ALTER TABLE rooms ADD COLUMN title TEXT NOT NULL DEFAULT ''")
+        # quizzes saved before the per-quiz switches existed; '{}' is the migration,
+        # since clean_mode turns an empty dict back into the original behaviour
+        qcols = {r["name"] for r in c.execute("PRAGMA table_info(quizzes)")}
+        if "mode" not in qcols:
+            c.execute("ALTER TABLE quizzes ADD COLUMN mode TEXT NOT NULL DEFAULT '{}'")
 
 
 def _roll(c, table, order_col, keep):
@@ -69,16 +75,17 @@ def _roll(c, table, order_col, keep):
 
 
 # ---------- saved quizzes ----------
-def save_quiz(title, capacity, questions):
+def save_quiz(title, capacity, questions, mode=None):
     """Remember a quiz so it can be run again. Re-saving a title updates it."""
     now = time.time()
     with _conn() as c:
         c.execute(
-            "INSERT INTO quizzes (title, capacity, questions, created, used) "
-            "VALUES (?,?,?,?,?) "
+            "INSERT INTO quizzes (title, capacity, questions, created, used, mode) "
+            "VALUES (?,?,?,?,?,?) "
             "ON CONFLICT(title) DO UPDATE SET "
-            "  capacity=excluded.capacity, questions=excluded.questions, used=excluded.used",
-            (title, capacity, json.dumps(questions), now, now))
+            "  capacity=excluded.capacity, questions=excluded.questions, "
+            "  used=excluded.used, mode=excluded.mode",
+            (title, capacity, json.dumps(questions), now, now, json.dumps(mode or {})))
         _roll(c, "quizzes", "used", settings.saved_quizzes)
 
 
@@ -97,9 +104,14 @@ def quiz_summaries():
 def quiz_by_id(qid):
     """Full definition — only fetched when a quiz is actually edited or run."""
     with _conn() as c:
-        r = c.execute("SELECT id, title, capacity, questions FROM quizzes WHERE id = ?",
+        r = c.execute("SELECT id, title, capacity, questions, mode FROM quizzes WHERE id = ?",
                       (qid,)).fetchone()
-    return {**dict(r), "questions": json.loads(r["questions"])} if r else None
+    if not r:
+        return None
+    # `mode` must be in the column list above: without it the builder silently
+    # loses a quiz's settings on edit and /run quietly runs it as a plain quiz
+    return {**dict(r), "questions": json.loads(r["questions"]),
+            "mode": json.loads(r["mode"] or "{}")}
 
 
 def touch_quiz(qid):

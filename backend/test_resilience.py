@@ -43,9 +43,9 @@ def delete(path, token):
     return json.load(urllib.request.urlopen(req))
 
 
-def new_room(token, n_players=10):
+def new_room(token, n_players=10, mode=None):
     return post("/api/quiz", {
-        "title": "Resilience", "capacity": n_players,
+        "title": "Resilience", "capacity": n_players, "mode": mode or {},
         "questions": [{"text": "2+2?", "options": ["3", "4"], "correct": 1, "timer": READ + ANSWER}],
     }, token)["room_code"]
 
@@ -61,7 +61,7 @@ async def recv_until(ws, want, timeout=25):
 
 
 async def join(code, email):
-    ws = await websockets.connect(f"{WS}/ws/play/{code}?email={email}")
+    ws = await websockets.connect(f"{WS}/ws/play/{code}?seat={email}")
     await recv_until(ws, "joined")
     return ws
 
@@ -96,6 +96,92 @@ async def check_host_pong(code, token):
     await recv_until(ws, "pong", timeout=5)
     await ws.close()
     print("  ok  host ping -> pong")
+
+
+async def check_join_mid_question(token):
+    """Someone walking in while a question is live is dropped straight into it,
+    on the room's clock — not handed a private fresh window, and not made to
+    wait outside until the next one."""
+    code = new_room(token)
+    early = await join(code, "early@a.edu")
+    host = await websockets.connect(f"{WS}/ws/host/{code}?token={token}")
+    await host.send('{"type":"start"}')
+
+    while True:
+        m = await recv_until(early, "question")
+        if m["phase"] == "answering":
+            break
+
+    late = await join(code, "late@a.edu")          # arrives mid-question
+    now = await recv_until(late, "question", timeout=5)
+    assert now["phase"] == "answering", f"late joiner landed on {now['phase']}, not the question"
+    assert now.get("options"), "late joiner got the question but no options"
+    assert now["remaining"] < m["window"], "late joiner was given a fresh window"
+
+    await late.send('{"type":"answer","option":1}')
+    await early.send('{"type":"answer","option":1}')
+    res = await recv_until(late, "results", timeout=ANSWER + 6)
+    assert res["your_score"] > 0, "the late joiner's answer did not score"
+    print(f"  ok  joined mid-question, scored {res['your_score']} on the room's clock")
+
+    for ws in (early, late, host):
+        await ws.close()
+
+
+async def check_open_question_waits_for_the_host(token):
+    """An open question has no clock AND no auto-finish: it must not close when
+    the room has answered, only when the host says so.
+
+    This is the one thing unit tests cannot reach — the second await point lives
+    inside run()'s loop.
+    """
+    code = new_room(token, mode={"timing": "open"})
+    a = await join(code, "open@a.edu")
+    host = await websockets.connect(f"{WS}/ws/host/{code}?token={token}")
+    await host.send('{"type":"start"}')
+
+    while True:
+        m = await recv_until(a, "question")
+        if m["phase"] == "answering":
+            break
+    assert "remaining" not in m and "window" not in m, "an open question sent a countdown"
+    assert m["elapsed"] >= 0, "an open question must report how long it has been up"
+
+    await a.send('{"type":"answer","option":1}')      # the whole room has now answered
+    try:
+        await recv_until(a, "results", timeout=ANSWER + 3)
+        raise AssertionError("the question closed on its own — it must wait for the host")
+    except asyncio.TimeoutError:
+        pass
+
+    await host.send('{"type":"next"}')                # Finish question
+    res = await recv_until(a, "results", timeout=5)
+    assert res["your_score"] > 0, "answering first in an open question must score"
+    print(f"  ok  open question held {ANSWER + 3}s, closed on the host ({res['your_score']} pts)")
+
+    for ws in (a, host):
+        await ws.close()
+
+
+async def check_anonymous_needs_no_typing(token):
+    """No name typed, and a refresh comes back as the same person."""
+    code = new_room(token, mode={"identity": "anonymous"})
+    ws = await websockets.connect(f"{WS}/ws/play/{code}?seat=device-aaa")
+    first = await recv_until(ws, "joined")
+    assert first["name"] and "@" not in first["name"], f"got {first.get('name')!r}"
+    assert "email" not in first, "the seat key must never travel back to the client"
+    await ws.close()
+
+    again = await websockets.connect(f"{WS}/ws/play/{code}?seat=device-aaa")
+    back = await recv_until(again, "joined")
+    assert back["name"] == first["name"], "a refresh must come back as the same player"
+
+    other = await websockets.connect(f"{WS}/ws/play/{code}?seat=device-bbb")
+    two = await recv_until(other, "joined")
+    assert two["name"] != first["name"], "two devices must not share a name"
+    print(f"  ok  anonymous join -> {first['name']!r}, stable across a refresh")
+    for w in (again, other):
+        await w.close()
 
 
 async def check_clock_is_universal(token):
@@ -239,6 +325,9 @@ async def main():
     code = new_room(token)
     await check_pong(code)
     await check_host_pong(code, token)
+    await check_join_mid_question(token)
+    await check_open_question_waits_for_the_host(token)
+    await check_anonymous_needs_no_typing(token)
     await check_clock_is_universal(token)
     await check_no_early_close_on_drop(token)
     await check_early_close_still_works(token)

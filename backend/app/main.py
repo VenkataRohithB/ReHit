@@ -28,7 +28,7 @@ log = logging.getLogger("quiz")
 
 def archive(room):
     """Persist a finished room so history and CSV outlive the process."""
-    top = [{"email": p.email, "score": p.score}
+    top = [{"name": p.name, "score": p.score}
            for p in rank_players(room.players.values())[:3]]
     store.save(room, build_csv(room), top)
     log.info("room %s archived (%d players)", room.code, len(room.players))
@@ -127,11 +127,22 @@ def create_quiz(quiz: QuizIn, run: bool = True, _: str = Depends(require_admin))
     building a quiz never commits you to hosting it. `room_code` is then null."""
     questions = [q.model_dump() for q in quiz.questions]
     # the save happens either way, and first: it must not depend on a room
-    store.save_quiz(quiz.title, quiz.capacity, questions)
-    code = manager.create(quiz.capacity, questions, quiz.title) if run else None
+    store.save_quiz(quiz.title, quiz.capacity, questions, quiz.mode)
+    code = manager.create(quiz.capacity, questions, quiz.title, quiz.mode) if run else None
     log.info("quiz saved: %r (%d questions, cap %d)%s", quiz.title, len(questions),
              quiz.capacity, f" — room {code}" if code else "")
     return {"room_code": code, "title": quiz.title}
+
+
+@app.get("/api/room/{code}")
+def room_info(code: str):
+    """What a joiner needs before being asked for anything: which kind of name
+    this room wants, and whether it exists at all. Unauthenticated on purpose —
+    it says less than the join page already does to someone holding the code."""
+    room = manager.get(code)
+    if not room:
+        raise HTTPException(404, "Room not found")
+    return {"identity": room.mode["identity"], "title": room.title, "state": room.state}
 
 
 @app.get("/api/activity")
@@ -161,7 +172,7 @@ def run_saved_quiz(qid: int, _: str = Depends(require_admin)):
     quiz = store.quiz_by_id(qid)
     if not quiz:
         raise HTTPException(404, "No saved quiz with that id")
-    code = manager.create(quiz["capacity"], quiz["questions"], quiz["title"])
+    code = manager.create(quiz["capacity"], quiz["questions"], quiz["title"], quiz["mode"])
     store.touch_quiz(qid)
     log.info("room %s created from saved quiz %r", code, quiz["title"])
     return {"room_code": code, "title": quiz["title"]}
@@ -193,18 +204,20 @@ def export_csv(code: str, _: str = Depends(require_admin)):
 
 # ---------- WebSockets ----------
 @app.websocket("/ws/play/{code}")
-async def ws_play(ws: WebSocket, code: str, email: str = Query(...)):
+async def ws_play(ws: WebSocket, code: str, seat: str = Query(...), name: str = Query("")):
+    """`seat` identifies the chair, not the person: an email in email mode, an
+    opaque per-device id otherwise. It is never echoed back to the room."""
     await ws.accept()
     room = manager.get(code)
-    email = email.strip().lower()
     if not room:
         await ws.send_json({"type": "error", "msg": "Room not found"})
         return await ws.close()
-    if not email:
-        await ws.send_json({"type": "error", "msg": "Email required"})
+    seat = seat.strip().lower()
+    if not seat:
+        await ws.send_json({"type": "error", "msg": "Could not identify you — reload the page"})
         return await ws.close()
 
-    player, err = room.add_or_reconnect(email)
+    player, err = room.add_or_reconnect(seat, name)
     if err:
         await ws.send_json({"type": "error", "msg": err})
         return await ws.close()
@@ -218,7 +231,9 @@ async def ws_play(ws: WebSocket, code: str, email: str = Query(...)):
             await old.close()
 
     try:
-        await ws.send_json({"type": "joined", "email": email, "state": room.state})
+        # the resolved name comes back: anonymous mode assigns one, and name mode
+        # may have trimmed what was typed
+        await ws.send_json({"type": "joined", "name": player.name, "state": room.state})
         await room.broadcast(room.lobby_msg())
         # put them back on whatever screen the room is showing, not just questions
         resume = room.resume_msg_for(player)
@@ -236,7 +251,7 @@ async def ws_play(ws: WebSocket, code: str, email: str = Query(...)):
             if kind == "ping":
                 await ws.send_json({"type": "pong"})
             elif kind == "answer":
-                room.record_answer(email, data.get("option"))
+                room.record_answer(seat, data.get("option"))
                 await room.send_hosts({"type": "progress",
                                        "answered": len(room.responses),
                                        "total": room.connected_count()})
