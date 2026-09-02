@@ -1,19 +1,37 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useParams } from 'react-router-dom'
-import { wsUrl } from '../lib/api.js'
+import { wsUrl, roomInfo } from '../lib/api.js'
 import { useSocket } from '../lib/useSocket.js'
 import {
-  Screen, Button, TimerBar, OptionKey, Leaderboard, QuestionMedia, Ticker, faceOf,
-  tone, useCountdown,
+  Screen, Button, TimerBar, OptionKey, Leaderboard, QuestionMedia, Ticker, faceOf, clock,
+  tone, useCountdown, useStopwatch,
 } from '../ui.jsx'
+
+/* Stable per-device id, shared across every room. It identifies a seat to the
+   server that issued it and is never shown to anyone.
+
+   Global, not per-room: a per-room id would be reminted on joining a second room,
+   which in name mode locks you out of your own name. And randomUUID is a
+   secure-context API — undefined on plain http, which is exactly how this gets
+   hosted for a class — hence the fallback. */
+const deviceId = () => {
+  let d = localStorage.getItem('quiz.device')
+  if (!d) {
+    d = crypto.randomUUID?.() ?? Math.random().toString(36).slice(2) + Date.now().toString(36)
+    localStorage.setItem('quiz.device', d)
+  }
+  return d
+}
 
 export default function Play() {
   const { code } = useParams()
-  // survive a refresh: the room remembers the email, so rejoining restores the score
+  // survive a refresh: the room remembers the seat, so rejoining restores the score
   const SEAT = `quiz.seat.${code}`
   const saved = localStorage.getItem(SEAT) || ''
-  const [email, setEmail] = useState(saved)
+  const [typed, setTyped] = useState(saved)     // what is in the join field
   const [joined, setJoined] = useState(!!saved)
+  const [identity, setIdentity] = useState(null)  // 'email' | 'name' | 'anonymous'
+  const [myName, setMyName] = useState(saved)     // resolved by the server on join
   const [err, setErr] = useState('')
   const [lobby, setLobby] = useState({ count: 0, capacity: 0 })
   const [view, setView] = useState({ screen: 'lobby' })
@@ -24,7 +42,10 @@ export default function Play() {
     switch (m.type) {
       case 'error':
         setErr(m.msg); setJoined(false); localStorage.removeItem(SEAT); break
-      case 'joined': setErr(''); localStorage.setItem(SEAT, m.email); break
+      case 'joined':
+        // the server resolves the final name: anonymous mode assigns one, and a
+        // typed one may have been trimmed
+        setErr(''); setMyName(m.name); localStorage.setItem(SEAT, m.name); break
       case 'lobby': setLobby(m); break
       case 'question':
         // your_answer is present when we refreshed after already answering
@@ -36,20 +57,34 @@ export default function Play() {
     }
   }, [SEAT])
 
-  const url = joined ? wsUrl(`/ws/play/${code}?email=${encodeURIComponent(email)}`) : null
+  // which kind of name this room wants, before we ask for anything
+  useEffect(() => { roomInfo(code).then((r) => setIdentity(r.identity)).catch(() => {}) }, [code])
+
+  // in email mode the seat IS the address; otherwise it is the device, which is
+  // what lets a name clash be refused without costing anyone their score
+  const seat = identity === 'email' ? typed.trim().toLowerCase() : deviceId()
+  const url = joined
+    ? wsUrl(`/ws/play/${code}?seat=${encodeURIComponent(seat)}` +
+            `&name=${encodeURIComponent(identity === 'name' ? typed.trim() : '')}`)
+    : null
   const { status, send } = useSocket(url, onMsg)
   const isQuestion = view.screen === 'question'
   const reading = isQuestion && view.phase === 'reading'
   // key on the phase as well as the index so the clock restarts at the reveal
   const timeLeft = useCountdown(isQuestion ? view.remaining : null, view.window ?? 0,
     `${view.index}:${view.phase}`)
-  const timeUp = isQuestion && !reading && timeLeft <= 0
+  const elapsed = useStopwatch(isQuestion ? view.elapsed : null, `${view.index}:${view.phase}`)
+  // an open (host-closed) question sends no `remaining`, and useCountdown returns 0
+  // for that — without this clause every tile would lock the instant it appeared
+  const timeUp = isQuestion && !reading && view.remaining != null && timeLeft <= 0
+  const scored = view.your_score != null
 
   const doJoin = (e) => {
     e.preventDefault()
-    const em = email.trim().toLowerCase()
-    if (!em) { setErr('Enter your email to join'); return }
-    setEmail(em)
+    if (identity !== 'anonymous' && !typed.trim()) {
+      setErr(identity === 'name' ? 'Enter a name to join' : 'Enter your email to join')
+      return
+    }
     setJoined(true)
   }
   const answer = (i) => {
@@ -78,11 +113,23 @@ export default function Play() {
         </div>
         <form onSubmit={doJoin} className="flex flex-1 flex-col justify-center gap-4 text-center">
           <h1 className="text-[clamp(1.6rem,8vw,2.4rem)] font-extrabold tracking-tight">Join the quiz</h1>
-          <input autoFocus type="email" value={email} onChange={(e) => setEmail(e.target.value)}
-            placeholder="you@atria.edu" aria-label="Your email"
-            className="rounded-2xl border-2 border-line px-5 py-4 text-left text-lg
-              outline-none placeholder:text-muted/60 focus:border-anchor" />
-          <Button type="submit" className="py-4 text-lg">Join</Button>
+          {/* one field, or none — an anonymous room asks for nothing at all */}
+          {identity === 'email' && (
+            <input autoFocus type="email" value={typed} onChange={(e) => setTyped(e.target.value)}
+              placeholder="you@atria.edu" aria-label="Your email"
+              className="rounded-2xl border-2 border-line px-5 py-4 text-left text-lg
+                outline-none placeholder:text-muted/60 focus:border-anchor" />
+          )}
+          {identity === 'name' && (
+            <input autoFocus type="text" value={typed} onChange={(e) => setTyped(e.target.value)}
+              placeholder="Your name" aria-label="Your name" maxLength={24}
+              className="rounded-2xl border-2 border-line px-5 py-4 text-left text-lg
+                outline-none placeholder:text-muted/60 focus:border-anchor" />
+          )}
+          {identity === 'anonymous' && (
+            <p className="text-muted">You'll get a name to play under — nothing to type.</p>
+          )}
+          <Button type="submit" className="py-4 text-lg" disabled={!identity}>Join</Button>
           {err && <p role="alert" className="font-semibold text-rose-ink">{err}</p>}
         </form>
       </Screen>
@@ -96,9 +143,11 @@ export default function Play() {
         tracking-[.08em] text-anchor">
         <span>{code}</span>
         {status !== 'open' && <span className="text-peach-ink">Reconnecting…</span>}
-        {isQuestion && !reading && (
-          <span className={`text-2xl font-extrabold tabular-nums
-            ${timeLeft <= 5 ? 'text-rose-ink' : 'text-ink'}`}>{Math.ceil(timeLeft)}</span>
+        {isQuestion && !reading && (view.remaining != null
+          ? <span className={`text-2xl font-extrabold tabular-nums
+              ${timeLeft <= 5 ? 'text-rose-ink' : 'text-ink'}`}>{Math.ceil(timeLeft)}</span>
+          // counting up, so nothing is running out and nothing is urgent
+          : <span className="text-2xl font-extrabold tabular-nums text-muted">{clock(elapsed)}</span>
         )}
       </div>
 
@@ -111,7 +160,7 @@ export default function Play() {
             {lobby.count === 1 ? 'player is' : 'players are'} in the room
           </p>
           <p className="mt-4 font-semibold">Waiting for the host to start…</p>
-          <p className="text-sm text-muted">{email}</p>
+          <p className="text-sm text-muted">{myName}</p>
         </div>
       )}
 
@@ -133,7 +182,7 @@ export default function Play() {
 
       {view.screen === 'question' && !reading && (
         <>
-          <TimerBar remaining={view.remaining} total={view.window} qkey={view.index} />
+          {view.remaining != null && <TimerBar remaining={view.remaining} total={view.window} qkey={view.index} />}
           <h2 className="flex-none text-[clamp(1.35rem,6vw,1.9rem)] font-extrabold leading-tight
             tracking-tight text-balance">{view.text}</h2>
           <QuestionMedia code={view.code} image={view.image} />
@@ -171,22 +220,33 @@ export default function Play() {
 
       {view.screen === 'results' && (
         <>
+          {/* the big slot carries points when there are points, and the verdict
+              when there are not. A poll has neither, so it just confirms the tap. */}
           <div className="flex flex-none flex-col items-center gap-1 py-4">
             <div className={`anim-pop text-[clamp(2.6rem,16vw,5rem)] font-extrabold tracking-tight
               ${view.gained > 0 ? 'text-mint-ink' : 'text-muted'}`}>
-              +<Ticker to={view.gained} ms={800} />
+              {scored ? <>+<Ticker to={view.gained} ms={800} /></>
+                : view.correct != null ? (picked === view.correct ? 'Correct' : 'Not this time')
+                  : 'Answered'}
             </div>
             <p className="font-semibold text-muted">
-              {view.gained > 0 ? 'Correct' : 'Not this time'} · {view.options[view.correct]}
+              {view.correct != null
+                ? <>{(scored ? view.gained > 0 : picked === view.correct) ? 'Correct' : 'Not this time'}
+                  {' · '}{view.options[view.correct]}</>
+                : picked != null ? <>You picked · {view.options[picked]}</> : 'Answer recorded'}
             </p>
           </div>
-          <Leaderboard rows={view.leaderboard.slice(0, 5)} meEmail={email} compact />
+          {view.leaderboard?.length > 0 &&
+            <Leaderboard rows={view.leaderboard.slice(0, 5)} meName={myName} compact />}
           <p className="flex-none text-center text-sm font-semibold text-muted">
             {view.last ? 'Waiting for the final results…' : 'Waiting for the host to continue…'}
           </p>
-          <div className="flex flex-none items-center justify-between font-semibold text-muted">
-            <span>You're #{view.your_rank}</span><span className="tabular-nums">{view.your_score} pts</span>
-          </div>
+          {scored && (
+            <div className="flex flex-none items-center justify-between font-semibold text-muted">
+              {view.your_rank != null && <span>You're #{view.your_rank}</span>}
+              <span className="ml-auto tabular-nums">{view.your_score} pts</span>
+            </div>
+          )}
         </>
       )}
 
@@ -195,20 +255,27 @@ export default function Play() {
           <div className="flex flex-none flex-col items-center gap-1 py-4">
             <div className="anim-pop text-[clamp(2.6rem,16vw,5rem)] font-extrabold
               tracking-tight text-anchor">
-              {faceOf(email)} #{rankOf(view.leaderboard, email)}
+              {faceOf(myName)}{view.leaderboard && ` #${rankOf(view.leaderboard, myName)}`}
             </div>
-            <p className="font-semibold text-muted">out of {view.total_players} players</p>
+            <p className="font-semibold text-muted">
+              {view.leaderboard ? `out of ${view.total_players} players`
+                : `${view.total_players} took part`}
+            </p>
           </div>
-          <Leaderboard rows={view.leaderboard.slice(0, 5)} meEmail={email} compact />
-          <p className="flex-none text-center font-semibold text-muted">Well played</p>
+          {view.leaderboard?.length > 0 &&
+            <Leaderboard rows={view.leaderboard.slice(0, 5)} meName={myName} compact />}
+          <p className="flex-none text-center font-semibold text-muted">
+            {view.leaderboard ? 'Well played' : 'Thanks for taking part'}
+          </p>
         </>
       )}
     </Screen>
   )
 }
 
-const rankOf = (lb, email) => {
-  const i = lb.findIndex((p) => p.email === email)
-  return i < 0 ? '—' : i + 1
+const rankOf = (lb, name) => {
+  const row = (lb || []).find((p) => p.name === name)
+  // the server's dense rank, so a tie reads the same here as on the projector
+  return row ? row.rank : '—'
 }
 

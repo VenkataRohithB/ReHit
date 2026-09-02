@@ -60,7 +60,8 @@ def test_history_rolls_over_too():
         # stamp in the past so these cannot outrank rooms saved by later tests
         r.code, r.ended_at = f"R{n:04d}", time.time() - 1000 + n
         store.save(r, "email,score\n", [])
-    kept = store.recent(100)
+    # ask for more than the limit keeps, or this asserts against the page size
+    kept = store.recent(settings.history_limit + 5)
     assert len(kept) == settings.history_limit, len(kept)
     assert kept[0]["code"] == f"R{settings.history_limit + 4:04d}", "newest first"
 
@@ -224,8 +225,63 @@ def test_join_rules():
     _, full = r.add_or_reconnect("z")    # capacity 2 reached
     assert full == "Room is full"
     r.state = "question"
-    _, late = r.add_or_reconnect("new")
-    assert late == "Game already started"
+    _, still_full = r.add_or_reconnect("new")
+    assert still_full == "Room is full", "capacity must still hold mid-game"
+    r.capacity = 5
+    p, err = r.add_or_reconnect("new")
+    assert err is None and p, "a new player should be able to join mid-game"
+    r.state = "ended"
+    _, done = r.add_or_reconnect("later")
+    assert done == "This quiz has already finished"
+
+
+def test_tied_scores_share_a_rank():
+    """Level scores finish level, and the numbering does not skip: 1, 1, 2.
+    Answer time still orders people inside a tie but no longer separates them."""
+    from app.game import dense_ranks
+    r = mkroom(nq=1)
+    for email, score, t in [("a", 2400, 5.0), ("b", 2400, 9.0),
+                            ("c", 1800, 3.0), ("d", 1800, 4.0), ("e", 900, 2.0)]:
+        p = Player(email)
+        p.score, p.total_time = score, t
+        r.players[email] = p
+
+    ranking = rank_players(r.players.values())
+    ranks = dense_ranks(ranking)
+    assert [ranks[p.email] for p in ranking] == [1, 1, 2, 2, 3], ranks
+    assert ranks["a"] == ranks["b"] == 1, "tied top scores must share first place"
+    assert ranks["e"] == 3, "dense ranking must not skip numbers after a tie"
+    # the faster of a tied pair still sorts first, it just does not outrank
+    assert [p.email for p in ranking][:2] == ["a", "b"], "time still orders within a tie"
+
+    rows = r.board(ranking)
+    assert [row["rank"] for row in rows] == [1, 1, 2, 2, 3]
+    assert rows[0]["score"] == rows[1]["score"] == 2400
+
+
+def test_late_joiner_rows_line_up_in_the_csv():
+    """Someone arriving at Q3 must not have their answer land in the q1 columns.
+    build_csv reads answers positionally, so the padding is what keeps it honest."""
+    r = mkroom(nq=3)
+    early = Player("early@y.com")
+    r.players["early@y.com"] = early
+    early.score = 900
+    early.answers = [{"option": 1, "time": 1.0, "correct": True, "points": 900},
+                     {"option": 0, "time": 2.0, "correct": False, "points": 0}]
+    r.revealed = 2                       # Q1 and Q2 have been scored
+    r.state = "question"
+
+    late, err = r.add_or_reconnect("late@y.com")
+    assert err is None and len(late.answers) == 2, "late joiner was not padded"
+    late.answers.append({"option": 1, "time": 1.5, "correct": True, "points": 950})
+    late.score = 950
+
+    rows = {l.split(",")[0]: l.split(",") for l in build_csv(r).strip().splitlines()[1:]}
+    cols = rows["late@y.com"]            # email, score, then 3 columns per question
+    assert cols[2:5] == ["", "", ""], "Q1 should be empty — they were not in the room"
+    assert cols[5:8] == ["", "", ""], "Q2 should be empty — they were not in the room"
+    assert cols[8] == "b", f"their Q3 answer landed in the wrong column: {cols}"
+    assert rows["early@y.com"][3] == "1", "the early player's row must be untouched"
 
 
 def test_refresh_takes_over_and_keeps_score():
@@ -247,11 +303,11 @@ def test_board_deltas():
     for e, s in (("a", 10), ("b", 20), ("c", 30)):
         p = Player(e); p.score = s; r.players[e] = p
     ranking = rank_players(r.players.values())          # c, b, a
-    assert [row["email"] for row in r.board(ranking)] == ["c", "b", "a"]
+    assert [row["name"] for row in r.board(ranking)] == ["c", "b", "a"]
     assert all(row["delta"] == 0 for row in r.board(ranking)), "no history yet"
     r.prev_rank = {"c": 3, "b": 2, "a": 1}              # pretend a used to lead
     rows = r.board(ranking)
-    by = {row["email"]: row["delta"] for row in rows}
+    by = {row["name"]: row["delta"] for row in rows}
     assert by["c"] == 2 and by["b"] == 0 and by["a"] == -2, by
     prev = [i + 1 + row["delta"] for i, row in enumerate(rows)]
     assert sorted(prev) == [1, 2, 3], "deltas must rebuild a valid previous ranking"
@@ -266,7 +322,7 @@ def test_csv():
                  {"option": None, "time": None, "correct": False, "points": 0}]
     out = build_csv(r)
     lines = out.strip().splitlines()
-    assert lines[0] == "email,score,q1_answer,q1_correct,q1_time,q2_answer,q2_correct,q2_time"
+    assert lines[0] == "name,score,q1_answer,q1_correct,q1_time,q2_answer,q2_correct,q2_time"
     assert lines[1].startswith("x@y.com,900,b,1,2.0,")
 
 
@@ -282,15 +338,198 @@ def test_history_roundtrip():
     p.answers = [{"option": 1, "time": 1.0, "correct": True, "points": 1200},
                  {"option": None, "time": None, "correct": False, "points": 0}]
     r.players["z@y.com"] = p
-    store.save(r, build_csv(r), [{"email": "z@y.com", "score": 1200}])
+    store.save(r, build_csv(r), [{"name": "z@y.com", "score": 1200}])
     row = next(x for x in store.recent(10) if x["code"] == "HIST01")
     assert row["players"] == 1 and row["questions"] == 2
-    assert row["top"][0]["email"] == "z@y.com"
+    assert row["top"][0]["name"] == "z@y.com"
     assert row["title"] == "Test quiz", row["title"]
     csv_text, title = store.csv_for("HIST01")
     assert "z@y.com" in csv_text and title == "Test quiz"
+    # a room archived before the email->name rename must still come back with a
+    # name — the dashboard reads winner.name and a missing one blanks the page
+    store.save(r, build_csv(r), [{"email": "old@y.com", "score": 5}])
+    row = next(x for x in store.recent(10) if x["code"] == "HIST01")
+    assert row["top"][0]["name"] == "old@y.com"
+    assert store.activity()[0]["winner"]["name"]
+
     store.save(r, build_csv(r), [])          # re-save must not raise on duplicate code
     assert store.csv_for("NOPE00") == (None, "")
+
+
+def test_mode_defaults_to_todays_behaviour():
+    """An old sqlite row, a missing key or junk all come back as the quiz that
+    used to run. /api/quizzes/{id}/run never touches pydantic, so this is the
+    only thing standing between stored data and the engine."""
+    from app.game import clean_mode
+    was = {"identity": "email", "grading": "graded", "scoring": "absolute",
+           "reveal": True, "board": "always", "timing": "countdown"}
+    assert clean_mode({}) == was
+    assert clean_mode(None) == was
+    assert clean_mode({"scoring": "banana", "nope": 1}) == was, "junk must not leak through"
+    assert set(clean_mode({"nope": 1})) == set(was), "the stored blob is exactly six keys"
+
+
+def test_mode_dependencies_are_resolved_once():
+    """The rules that make the degenerate screens unreachable rather than guarded."""
+    from app.game import clean_mode
+    m = clean_mode({"grading": "feedback", "board": "always", "scoring": "absolute"})
+    assert m["scoring"] == "none", "a poll has nothing to score"
+    assert m["board"] == "never", "and therefore nothing to rank"
+    m = clean_mode({"timing": "open", "scoring": "absolute"})
+    assert m["scoring"] == "relative", "an open question has no window for absolute speed"
+
+
+def test_relative_scoring_spans_first_response_to_close():
+    from app.game import score_relative
+    assert score_relative(True, 2.0, 2.0, 10.0) == 1000    # first one in
+    assert score_relative(True, 10.0, 2.0, 10.0) == 500    # answered as it closed
+    assert score_relative(True, 6.0, 2.0, 10.0) == 750     # halfway
+    assert score_relative(False, 2.0, 2.0, 10.0) == 0      # wrong is wrong
+    assert score_relative(True, 5.0, 5.0, 5.0) == 1000     # lone responder
+    assert score_relative(True, 3.0, 3.0, 2.0) == 1000     # close before first: guarded
+
+
+def test_relative_window_starts_at_the_first_response_even_if_it_was_wrong():
+    """`first` is the first RESPONSE, not the first correct one. Switching it to
+    first-correct silently rescales everyone, so pin it."""
+    r = mkroom(nq=1)
+    r.mode = {**r.mode, "scoring": "relative"}
+    r.answer_len = 30
+    r.q_start = time.time() - 10
+    for name, t in [("fast@x", 1.0), ("slow@x", 5.0)]:
+        r.players[name] = Player(name)
+        r.responses[name] = (0 if name.startswith("fast") else 1, t)  # fast one is WRONG
+    score = r._scorer()
+    # the correct answer came at t=5 in a window that opened at t=1
+    assert score(True, 5.0) < 1000, "the wrong-but-fastest answer must still open the window"
+    assert score(True, 1.0) == 1000
+
+
+def test_a_null_answer_cannot_match_a_null_correct():
+    """A poll has correct=None. Without a range guard `opt == correct` is
+    None == None, and anyone sending a null option scores full marks."""
+    r = mkroom(nq=1)
+    r.questions[0]["correct"] = None
+    r.players["a"] = Player("a")
+    r.state = "question"
+    r.q_start = time.time()
+    for bad in (None, "1", 99, -1, True):
+        r.record_answer("a", bad)
+    assert r.responses == {}, f"a non-option was accepted: {r.responses}"
+    r.record_answer("a", 1)
+    assert r.responses["a"][0] == 1, "a real option must still go through"
+
+
+def test_open_question_is_not_clamped_and_only_the_host_closes_it():
+    r = mkroom(nq=1)
+    r.mode = {**r.mode, "timing": "open"}
+    r.timed = False
+    r.answer_len = 20
+    r.players["a"] = Player("a")
+    r.state = "question"
+    r.q_start = time.time() - 45        # open far longer than the nominal window
+    r.record_answer("a", 1)
+    assert r.responses["a"][1] > 20, "an open question must not clamp to answer_len"
+    assert r.request_next() is True, "Finish must close a live open question"
+    r2 = mkroom(nq=1)                   # ...but never a timed one
+    r2.state = "question"
+    assert r2.request_next() is False
+
+
+def test_names_are_unique_and_a_refresh_keeps_the_seat():
+    r = mkroom(nq=1)
+    r.mode = {**r.mode, "identity": "name"}
+    p, err = r.add_or_reconnect("device-1", "Priya")
+    assert err is None and p.name == "Priya"
+    _, clash = r.add_or_reconnect("device-2", "priya")
+    assert clash and "taken" in clash, clash
+    _, blank = r.add_or_reconnect("device-3", "   ")
+    assert blank == "Enter a name to join"
+    p.score = 700
+    again, err = r.add_or_reconnect("device-1", "anything")
+    assert err is None and again is p and again.score == 700, "refresh must keep the seat"
+
+
+def test_anonymous_players_get_distinct_names():
+    r = mkroom(nq=1)
+    r.mode = {**r.mode, "identity": "anonymous"}
+    names = set()
+    for i in range(25):
+        p, err = r.add_or_reconnect(f"dev-{i}", "")
+        assert err is None
+        names.add(p.name)
+    assert len(names) == 25, f"generated a duplicate name: {len(names)}/25"
+
+
+def test_board_and_answer_are_omitted_not_nulled():
+    """Clients draw what they are given, so 'off' must mean absent."""
+    import asyncio
+    q = {"text": "Q", "options": ["a", "b"], "correct": 1, "timer": 20}
+
+    def reveal(mode):
+        r = Room("T", 60, [q], advance_timeout=900, mode=mode)
+        r.answer_len = 20
+        r.players["a"] = Player("a")
+        r.q_start = time.time()
+        r.responses["a"] = (1, 1.0)
+        asyncio.run(r._reveal(0, r.questions[0]))
+        return r
+
+    on = reveal({}).last_results
+    assert "correct" in on and "leaderboard" in on
+
+    hidden = reveal({"reveal": False}).last_results
+    assert "correct" not in hidden, "reveal:false must not ship the answer at all"
+    assert hidden["leaderboard"][0]["score"] > 0, "hiding the answer must still score"
+
+    at_end = reveal({"board": "end"})
+    assert "leaderboard" not in at_end.last_results, "board:end shows nothing per question"
+
+    poll = reveal({"grading": "feedback"})
+    assert "correct" not in poll.last_results and "leaderboard" not in poll.last_results
+    assert poll.players["a"].score == 0, "a poll scores nothing"
+    assert poll.last_results["tally"] == [0, 1], "but it still counts the votes"
+
+
+def test_blank_options_move_the_answer_key_with_them():
+    """The browser used to do this remap on its own; any other client posting
+    here got a silently wrong answer key. Now the API owns it."""
+    from app.models import QuestionIn
+    import pydantic
+
+    # the blank sits ABOVE the answer, so a naive strip promotes "Rome"
+    q = QuestionIn(text="Capital of France?", options=["", "Paris", "Rome"], correct=1)
+    assert q.options == ["Paris", "Rome"]
+    assert q.options[q.correct] == "Paris", q.options[q.correct]
+
+    # blanks below the answer, and several of them, leave it where it is
+    q = QuestionIn(text="Q?", options=["  ", "a", "", "b", "  "], correct=1)
+    assert q.options == ["a", "b"] and q.options[q.correct] == "a"
+
+    # marking a blank correct is a mistake, not a silent conversion to a poll
+    try:
+        QuestionIn(text="Q?", options=["", "a", "b"], correct=0)
+        raise AssertionError("a blank marked correct must be rejected")
+    except pydantic.ValidationError as e:
+        assert "blank" in str(e)
+
+    # a poll keeps no answer key, and still drops its blanks
+    q = QuestionIn(text="Q?", options=["a", "", "b"], correct=None)
+    assert q.options == ["a", "b"] and q.correct is None
+
+
+def test_login_ships_the_limits_the_api_enforces():
+    """The paste box pre-checks against these; a hardcoded second copy in the
+    browser would quietly disagree with the API once one is env-tuned."""
+    from app.config import settings
+    from app.main import login
+    from app.models import LoginReq
+
+    body = login(LoginReq(username=settings.admin_user, password=settings.admin_pass))
+    assert body["limits"] == {
+        "questions": settings.max_questions, "options": settings.max_options,
+        "timer": settings.max_timer, "code": settings.max_code_chars,
+    }
 
 
 if __name__ == "__main__":

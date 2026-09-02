@@ -4,6 +4,7 @@ import re
 from pydantic import BaseModel, field_validator, model_validator
 
 from .config import settings
+from .game import clean_mode
 
 
 class LoginReq(BaseModel):
@@ -14,7 +15,7 @@ class LoginReq(BaseModel):
 class QuestionIn(BaseModel):
     text: str
     options: list[str]
-    correct: int
+    correct: int | None = None   # a poll has no answer key
     timer: int = 20
     code: str | None = None    # optional snippet shown above the options
     image: str | None = None   # optional illustration, by URL
@@ -52,6 +53,30 @@ class QuestionIn(BaseModel):
             raise ValueError("image must be an http:// or https:// URL")
         return v
 
+    @model_validator(mode="before")
+    @classmethod
+    def _blank_options(cls, data):
+        """Drop blank options, and move `correct` with its own option.
+
+        Before the field validators, because dropping a blank shifts every index
+        after it: strip without remapping and a blank sitting above the answer
+        silently promotes the option below it. The browser used to do this remap
+        on its own, which left every other client posting here — a script, a
+        re-save, a second UI — with a quietly wrong answer key.
+        """
+        if not isinstance(data, dict) or not isinstance(data.get("options"), list):
+            return data
+        opts = data["options"]
+        kept = [i for i, o in enumerate(opts) if isinstance(o, str) and o.strip()]
+        correct = data.get("correct")
+        if isinstance(correct, int) and not isinstance(correct, bool) \
+                and 0 <= correct < len(opts):
+            if correct not in kept:
+                raise ValueError("the option marked correct is blank")
+            correct = kept.index(correct)
+        # out-of-range indexes are left alone for _correct_in_range to reject
+        return {**data, "options": [opts[i].strip() for i in kept], "correct": correct}
+
     @field_validator("options")
     @classmethod
     def _options(cls, v):
@@ -71,7 +96,7 @@ class QuestionIn(BaseModel):
 
     @model_validator(mode="after")
     def _correct_in_range(self):
-        if not (0 <= self.correct < len(self.options)):
+        if self.correct is not None and not (0 <= self.correct < len(self.options)):
             raise ValueError("correct index out of range")
         return self
 
@@ -80,6 +105,14 @@ class QuizIn(BaseModel):
     title: str
     capacity: int
     questions: list[QuestionIn]
+    mode: dict = {}              # the six per-quiz switches; see game.MODES
+
+    @field_validator("mode")
+    @classmethod
+    def _mode(cls, v):
+        # clean_mode drops unknown keys and falls back to today's behaviour, so a
+        # stale client cannot post a switch we do not have
+        return clean_mode(v)
 
     @field_validator("title")
     @classmethod

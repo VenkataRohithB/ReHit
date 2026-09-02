@@ -11,7 +11,7 @@ def _int(name, default):
 
 class Settings:
     admin_user = os.getenv("ADMIN_USER", "Admin")
-    admin_pass = os.getenv("ADMIN_PASS", "Password123")
+    admin_pass = os.getenv("ADMIN_PASS", "AUACAD@2026")
 
     # question is shown alone for this long before the options appear; the answer
     # clock (and therefore scoring) only starts once they do
@@ -23,9 +23,11 @@ class Settings:
     room_ttl_secs = _int("ROOM_TTL_SECS", 3600)  # reap ended / abandoned rooms after this
 
     db_path = os.getenv("DB_PATH", "quiz.db")
-    # both tables roll over — only the most recent rows are kept
-    history_limit = _int("HISTORY_LIMIT", 10)    # finished games
-    saved_quizzes = _int("SAVED_QUIZZES", 10)    # reusable quiz definitions
+    # both tables roll over — only the most recent rows are kept. A quiz rolling
+    # off takes its questions with it (the dashboard row survives for its CSV, but
+    # Re-run goes), so these are set high enough that it should never bite.
+    history_limit = _int("HISTORY_LIMIT", 200)   # finished games
+    saved_quizzes = _int("SAVED_QUIZZES", 200)   # reusable quiz definitions
     max_title = _int("MAX_TITLE", 80)
     session_secs = _int("SESSION_SECS", 43200)   # admin session lifetime (12h)
 

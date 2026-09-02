@@ -1,3 +1,5 @@
+import { LIMITS } from './parseQuiz.js'
+
 /** Thrown when the server rejects our token — the app clears the session on this. */
 export class AuthError extends Error {}
 
@@ -17,17 +19,21 @@ export async function login(username, password) {
     body: JSON.stringify({ username, password }),
   })
   if (!r.ok) throw new Error('Invalid credentials')
-  return r.json()          // { token, read_secs }
+  const body = await r.json()          // { token, read_secs, limits }
+  Object.assign(LIMITS, body.limits)   // the server's bounds win over our defaults
+  return body
 }
 
-export async function createQuiz(token, quiz) {
-  const r = await authed(token, '/api/quiz', {
+/** Save a quiz. `run` false saves it without spawning a room, and resolves to
+ *  null instead of a room code. */
+export async function createQuiz(token, quiz, run = true) {
+  const r = await authed(token, `/api/quiz${run ? '' : '?run=false'}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(quiz),
   })
   if (!r.ok) {
-    let msg = 'Could not create the room'
+    let msg = run ? 'Could not create the room' : 'Could not save the quiz'
     try {
       const body = await r.json()
       msg = body.detail?.[0]?.msg || body.detail || msg
@@ -35,6 +41,14 @@ export async function createQuiz(token, quiz) {
     throw new Error(msg)
   }
   return (await r.json()).room_code
+}
+
+/** What a joiner needs before being asked for anything: which kind of name this
+ *  room wants, and whether it exists. Unauthenticated — players have no token. */
+export async function roomInfo(code) {
+  const r = await fetch(`/api/room/${encodeURIComponent(code)}`)
+  if (!r.ok) throw new Error('Room not found')
+  return r.json()
 }
 
 /** Dashboard feed: live rooms + one row per quiz. Names and counts only —

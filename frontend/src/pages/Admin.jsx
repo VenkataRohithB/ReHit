@@ -4,11 +4,11 @@ import {
   login, createQuiz, downloadCsv, activity, savedQuiz, runSavedQuiz, deleteQuiz,
   wsUrl, AuthError,
 } from '../lib/api.js'
-import { parseQuiz, EXAMPLE } from '../lib/parseQuiz.js'
+import { parseQuiz, formatQuiz, EXAMPLE } from '../lib/parseQuiz.js'
 import { useSocket } from '../lib/useSocket.js'
 import {
   Screen, JoinStrip, Button, TimerRing, OptionKey, ResultBars, RaceBoard,
-  WinnerFinale, LobbyPills, QuestionMedia, tone,
+  WinnerFinale, LobbyPills, QuestionMedia, tone, useStopwatch, clock,
 } from '../ui.jsx'
 
 const TOKEN_KEY = 'quiz.token'
@@ -22,7 +22,52 @@ const READ_KEY = 'quiz.read'   // seconds of reading time, for the builder hint
 const blankQ = () => ({ text: '', timer: 20, options: ['', ''], correct: 0 })
 const todayName = () =>
   `Quiz — ${new Date().toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}`
-const blankQuiz = () => ({ title: todayName(), capacity: 60, questions: [blankQ()] })
+/* The six per-quiz switches. First value of each is what the app has always done,
+   so a quiz built without touching any of this behaves exactly as before. */
+const DEFAULT_MODE = {
+  identity: 'email', grading: 'graded', scoring: 'absolute',
+  reveal: true, board: 'always', timing: 'countdown',
+}
+const SWITCHES = [
+  ['identity', 'Players join by', [['email', 'Their email'], ['name', 'A name they choose'],
+    ['anonymous', 'Nothing — anonymous']]],
+  ['grading', 'Answers are', [['graded', 'Graded — one is correct'],
+    ['feedback', 'A poll — no right answer']]],
+  ['timing', 'Each question', [['countdown', 'Runs on its timer'],
+    ['open', 'Stays open until I close it']]],
+  ['scoring', 'Points', [['absolute', 'Faster is worth more'],
+    ['relative', 'Faster than the rest of the room'],
+    ['flat', 'The same for every correct answer'], ['none', 'No points — just right or wrong']]],
+  ['reveal', 'After each one', [[true, 'Show the correct answer'],
+    [false, 'Keep the answer hidden']]],
+  ['board', 'Leaderboard', [['always', 'After every question'], ['end', 'Only at the end'],
+    ['never', 'Never']]],
+]
+/* Faithful port of clean_mode (backend/app/game.py): the same three dependency
+   rules, in the same order. The server re-applies them on save and again when the
+   room is built — this is display only, so the builder shows the quiz that will
+   actually run rather than the buttons that were clicked. Without it a poll still
+   reads "Faster is worth more", and an open question still claims absolute speed. */
+const settle = (m) => {
+  const out = { ...m }
+  if (out.grading === 'feedback') out.scoring = 'none'
+  if (out.scoring === 'none') out.board = 'never'
+  if (out.timing === 'open' && out.scoring === 'absolute') out.scoring = 'relative'
+  return out
+}
+
+/* A switch that cannot matter is greyed out rather than hidden, so nothing
+   silently disappears while you are reading. */
+const switchOff = (m) => ({
+  scoring: m.grading === 'feedback',
+  reveal: m.grading === 'feedback',
+  board: m.grading === 'feedback' || m.scoring === 'none',
+})
+const summarise = (m) => SWITCHES
+  .map(([k, , opts]) => (opts.find(([v]) => v === m[k]) || [])[1])
+  .filter(Boolean).join(' · ')
+
+const blankQuiz = () => ({ title: todayName(), capacity: 60, questions: [blankQ()], mode: {} })
 
 export default function Admin() {
   const [token, setTok] = useState(() => localStorage.getItem(TOKEN_KEY))
@@ -226,7 +271,7 @@ function Dashboard({ token, onNew, onEdit: openInBuilder, onOpen, onAuthFail }) 
             {row.winner && (
               <span className="flex items-center gap-1.5 rounded-full bg-butter px-3 py-1
                 text-sm font-semibold text-butter-ink">
-                Winner {row.winner.email.split('@')[0]}
+                Winner {(row.winner.name || '?').split('@')[0]}
                 <b className="font-extrabold tabular-nums">{row.winner.score}</b>
               </span>
             )}
@@ -260,16 +305,20 @@ function TimerSplit({ total, read }) {
 }
 
 /* ============================ bulk import ============================ */
-function BulkImport({ existing, onLoad, onClose }) {
-  const [text, setText] = useState('')
-  const parsed = text.trim() ? parseQuiz(text) : null
+function BulkImport({ existing, graded, onLoad, onClose }) {
+  // opens holding whatever is already in the builder, so the whole quiz can be
+  // reworked as text in one go rather than a field at a time
+  const [text, setText] = useState(() => formatQuiz(existing))
+  const parsed = text.trim() ? parseQuiz(text, graded) : null
   const ready = parsed?.questions.length || 0
   const replacing = existing.filter((q) => q.text.trim()).length
 
   return (
     <div className="mb-6 rounded-2xl border border-line p-5">
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-        <h2 className="font-extrabold">Paste questions</h2>
+        <h2 className="font-extrabold">
+          {replacing ? 'Edit questions as text' : 'Paste questions'}
+        </h2>
         <button onClick={onClose}
           className="text-sm font-semibold text-muted hover:text-ink">Close</button>
       </div>
@@ -322,29 +371,37 @@ function Builder({ token, initial, onCreated, onCancel, onAuthFail }) {
   const [questions, setQuestions] = useState(
     initial.questions.map((q) => ({ ...q, timer: String(q.timer ?? 20) })))
   const [err, setErr] = useState('')
-  const [busy, setBusy] = useState(false)
+  const [busy, setBusy] = useState('')      // '' | 'save' | 'start' — which button is in flight
   const [bulk, setBulk] = useState(false)
+  const [mode, setMode] = useState(() => ({ ...DEFAULT_MODE, ...(initial.mode || {}) }))
+  const [showModes, setShowModes] = useState(false)
   const readSecs = Number(localStorage.getItem(READ_KEY) || 0)
   const patch = (qi, fn) => setQuestions((qs) => qs.map((q, i) => (i === qi ? fn(q) : q)))
 
-  const create = async () => {
+  /* run=false saves the quiz and drops back to the dashboard without starting a
+     room; onCreated(null) already routes there. */
+  const create = async (run) => {
     if (!title.trim()) { setErr('Give the quiz a name so you can find it again'); return }
-    setErr(''); setBusy(true)
+    setErr(''); setBusy(run ? 'start' : 'save')
     try {
       onCreated(await createQuiz(token, {
         title: title.trim(),
         capacity: Number(capacity),
+        mode: settle(mode),
+        // options go up as typed: the server drops the blanks and moves `correct`
+        // with its own option, so that index shift is decided in exactly one place
         questions: questions.map((q) => ({
           text: q.text.trim(), timer: Number(q.timer) || 20,
-          options: q.options.map((o) => o.trim()).filter(Boolean), correct: q.correct,
-          code: q.code?.trim() ? q.code : null,     // omit the optional extras when unused
+          options: q.options,
+          correct: q.correct,
+          code: q.code?.trim() ? q.code : null,   // omit the optional extras when unused
           image: q.image?.trim() ? q.image.trim() : null,
         })),
-      }))
+      }, run))
     } catch (e) {
       if (e instanceof AuthError) return onAuthFail()
       setErr(e.message)
-    } finally { setBusy(false) }
+    } finally { setBusy('') }
   }
 
   return (
@@ -364,7 +421,7 @@ function Builder({ token, initial, onCreated, onCancel, onAuthFail }) {
           </label>
           <button onClick={() => setBulk((b) => !b)}
             className="rounded-xl bg-track px-4 py-2 text-sm font-extrabold hover:brightness-95">
-            Paste questions
+            {questions.some((q) => q.text.trim()) ? 'Edit all as text' : 'Paste questions'}
           </button>
           <button onClick={onCancel}
             className="rounded-xl px-3 py-2 text-sm font-semibold text-muted hover:text-ink">
@@ -373,8 +430,49 @@ function Builder({ token, initial, onCreated, onCancel, onAuthFail }) {
         </div>
       </div>
 
+      {/* How this quiz runs. Collapsed to one sentence by default, because the
+          default is what the app has always done and most quizzes never touch it. */}
+      <div className="mb-6 mt-1">
+        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-sm text-muted">
+          <span className="font-semibold">{summarise(settle(mode))}</span>
+          <button onClick={() => setShowModes((s) => !s)}
+            className="font-semibold text-anchor hover:underline">
+            {showModes ? 'Done' : 'Change'}
+          </button>
+        </div>
+        {showModes && (
+          <div className="mt-3 flex flex-wrap gap-x-6 gap-y-3 rounded-2xl border border-line p-4">
+            {SWITCHES.map(([key, label, opts]) => {
+              const off = switchOff(mode)[key]
+              // absolute speed needs a fixed window, which an open question has not
+              const choices = key === 'scoring' && mode.timing === 'open'
+                ? opts.filter(([v]) => v !== 'absolute') : opts
+              return (
+                <label key={key}
+                  className={`flex flex-col gap-1 text-sm font-semibold
+                    ${off ? 'opacity-40' : 'text-muted'}`}>
+                  {label}
+                  <select disabled={off} value={String(settle(mode)[key])}
+                    onChange={(e) => setMode((m) => {
+                      const val = choices.find(([v]) => String(v) === e.target.value)[0]
+                      return { ...m, [key]: val }
+                    })}
+                    className="rounded-lg border-2 border-line bg-canvas px-2 py-1.5 font-semibold
+                      text-ink outline-none focus:border-anchor">
+                    {choices.map(([v, text]) => (
+                      <option key={String(v)} value={String(v)}>{text}</option>
+                    ))}
+                  </select>
+                </label>
+              )
+            })}
+          </div>
+        )}
+      </div>
+
       {bulk && (
-        <BulkImport existing={questions} onClose={() => setBulk(false)}
+        <BulkImport existing={questions} graded={mode.grading === 'graded'}
+          onClose={() => setBulk(false)}
           onLoad={(qs) => {
             setQuestions(qs.map((q) => ({ ...q, timer: String(q.timer) })))
             setBulk(false)
@@ -468,7 +566,14 @@ function Builder({ token, initial, onCreated, onCancel, onAuthFail }) {
           className="rounded-xl bg-track px-5 py-3.5 font-extrabold hover:brightness-95">
           + Add question
         </button>
-        <Button onClick={create} disabled={busy}>{busy ? 'Creating…' : 'Create room'}</Button>
+        <Button onClick={() => create(false)} disabled={!!busy}>
+          {busy === 'save' ? 'Saving…' : 'Save for later'}
+        </Button>
+        <button onClick={() => create(true)} disabled={!!busy}
+          className="rounded-xl bg-track px-5 py-3.5 font-extrabold hover:brightness-95
+            disabled:opacity-60">
+          {busy === 'start' ? 'Creating…' : 'Save & start now'}
+        </button>
         {err && <span role="alert" className="font-semibold text-rose-ink">{err}</span>}
       </div>
     </div>
@@ -526,7 +631,10 @@ function Host({ token, code, onExit, onAuthFail }) {
   const [advancing, setAdvancing] = useState(false)
   // only show it as advancing if the request actually left — otherwise the button
   // greys out on a dead socket and the host is stuck with no idea why
+  // also closes an open question — the server accepts `next` there too
   const next = () => { if (send({ type: 'next' })) setAdvancing(true) }
+  const openFor = useStopwatch(phase === 'question' ? question?.elapsed : null,
+    `${question?.index}:${question?.phase}`)
 
   // navigator.clipboard does not exist on a plain-http origin, which is exactly
   // how this gets hosted for a class (http://<laptop-ip>:8000). Fall back to the
@@ -640,8 +748,21 @@ function Host({ token, code, onExit, onAuthFail }) {
                   </b>
                   <span className="font-semibold text-muted">of {progress.total} answered</span>
                 </span>
-                <TimerRing remaining={question.remaining} total={question.window}
-                  qkey={question.index} className="w-[clamp(4rem,9vw,7.5rem)]" />
+                {/* on a clock, the ring counts down and closes it. Open, the clock
+                    counts up and the only thing that closes it is this button. */}
+                {question.remaining != null ? (
+                  <TimerRing remaining={question.remaining} total={question.window}
+                    qkey={question.index} className="w-[clamp(4rem,9vw,7.5rem)]" />
+                ) : (
+                  <span className="flex items-center gap-4">
+                    <b className="text-[clamp(1.6rem,4vw,3.4rem)] font-extrabold tabular-nums text-muted">
+                      {clock(openFor)}
+                    </b>
+                    <Button onClick={next} disabled={advancing} className="flex-none">
+                      Finish question →
+                    </Button>
+                  </span>
+                )}
               </div>
             </>
           )}
@@ -661,11 +782,17 @@ function Host({ token, code, onExit, onAuthFail }) {
           <ResultBars tally={results.tally} options={results.options} correct={results.correct} />
           <div className="flex flex-none items-center justify-between gap-4">
             <span className="font-semibold text-muted">
-              Correct answer · {results.options[results.correct]} ·{' '}
-              {results.tally[results.correct]} of {results.total_players} got it
+              {results.correct != null
+                ? <>Correct answer · {results.options[results.correct]} ·{' '}
+                  {results.tally[results.correct]} of {results.total_players} got it</>
+                : <>{results.tally.reduce((a, b) => a + b, 0)} of {results.total_players} answered</>}
             </span>
-            <Button onClick={() => setPhase('board')} className="flex-none">
-              Show leaderboard →
+            {/* one forward button, whatever comes next — with no leaderboard to show,
+                this is the only thing that advances the room */}
+            <Button onClick={results.leaderboard ? () => setPhase('board') : next}
+              disabled={!results.leaderboard && advancing} className="flex-none">
+              {results.leaderboard ? 'Show leaderboard →'
+                : results.last ? 'Show final results' : 'Next question →'}
             </Button>
           </div>
         </>
@@ -682,9 +809,18 @@ function Host({ token, code, onExit, onAuthFail }) {
           </div>
           <RaceBoard rows={results.leaderboard} />
           <div className="flex flex-none items-center justify-between gap-4">
-            <span className="font-semibold text-muted">
-              Top {results.leaderboard.length} of {results.total_players} players
-            </span>
+            {/* the last screen before the next question, so it is where a
+                latecomer gets a chance to scan in — players may join any time */}
+            <div className="flex items-center gap-3">
+              {qr && <img src={qr} alt={`QR code to join room ${code}`}
+                className="w-[clamp(2.75rem,5vw,4.25rem)] flex-none rounded-lg" />}
+              <span className="font-semibold text-muted">
+                Top {results.leaderboard.length} of {results.total_players} players
+                <span className="block text-[.85em] font-medium">
+                  Scan to join — you can come in at any point
+                </span>
+              </span>
+            </div>
             <div className="flex flex-none items-center gap-2">
               <button onClick={() => setPhase('bars')}
                 className="rounded-xl px-4 py-3 font-semibold text-muted hover:text-ink">
@@ -700,12 +836,27 @@ function Host({ token, code, onExit, onAuthFail }) {
 
       {phase === 'over' && over && (
         <>
-          <WinnerFinale rows={over.leaderboard} totalPlayers={over.total_players} />
+          {/* nothing was scored, so there is no podium to build — close on the
+              fact that everyone took part rather than on an empty stage */}
+          {over.leaderboard
+            ? <WinnerFinale rows={over.leaderboard} totalPlayers={over.total_players} />
+            : (
+              <div className="flex flex-1 flex-col items-center justify-center gap-2 text-center">
+                <div className="text-[clamp(1.6rem,4.6vw,4rem)] font-extrabold tracking-tight">
+                  That's the last question
+                </div>
+                <p className="text-[clamp(1rem,2vw,1.6rem)] font-semibold text-muted">
+                  {over.total_players} took part
+                </p>
+              </div>
+            )}
           <div className="flex flex-none flex-wrap items-center justify-center gap-2">
-            {over.leaderboard.slice(3, 8).map((p, i) => (
-              <span key={p.email} className="rounded-full bg-track px-4 py-1.5
+            {/* by rank, not by index — a tie on the podium makes them differ,
+                and slicing by index would list a medallist again as 4th */}
+            {(over.leaderboard || []).filter((p) => (p.rank ?? 99) > 3).slice(0, 5).map((p) => (
+              <span key={p.name} className="rounded-full bg-track px-4 py-1.5
                 text-[clamp(.7rem,1.2vw,1rem)] font-semibold">
-                {i + 4} · {p.email.split('@')[0]}{' '}
+                {p.rank} · {p.name.split('@')[0]}{' '}
                 <b className="font-extrabold tabular-nums">{p.score}</b>
               </span>
             ))}

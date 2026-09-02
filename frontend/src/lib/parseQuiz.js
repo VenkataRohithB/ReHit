@@ -24,9 +24,11 @@
  * written for the person pasting, not for a developer.
  */
 
-export const MAX_QUESTIONS = 50
-export const MAX_OPTIONS = 6
-export const MAX_TIMER = 300
+/* The server owns these — login fills them in (see api.js). The values here are
+   only what config.py defaults to, so a paste checked before the first login is
+   still checked against something sane. The API re-validates regardless; these
+   exist to name the offending line instead of failing the whole save. */
+export const LIMITS = { questions: 50, options: 6, timer: 300, code: 2000 }
 export const DEFAULT_TIMER = 20
 
 export const EXAMPLE = `Which sorting algorithm has O(n log n) worst case? [20]
@@ -54,21 +56,22 @@ const OPTION_RE = /^\s*([-*])\s*(.+?)\s*$/
 const TIMER_RE = /\s*\[(\d+)\s*s?\]\s*$/i
 const FENCE_RE = /^\s*```/
 const IMAGE_RE = /^\s*!\s*(?:\[[^\]]*\]\()?\s*(https?:\/\/\S+?)\s*\)?\s*$/i
-const MAX_CODE = 2000
 
 const err = (line, msg) => ({ line, msg })
 
 /** Validate one assembled question; returns an array of errors (empty if fine). */
-function checkQuestion(q, errors) {
+function checkQuestion(q, errors, graded) {
   if (q.options.length < 2) {
     errors.push(err(q.line, `"${trunc(q.text)}" needs at least 2 options`))
     return false
   }
-  if (q.options.length > MAX_OPTIONS) {
-    errors.push(err(q.line, `"${trunc(q.text)}" has ${q.options.length} options — the maximum is ${MAX_OPTIONS}`))
+  if (q.options.length > LIMITS.options) {
+    errors.push(err(q.line, `"${trunc(q.text)}" has ${q.options.length} options — the maximum is ${LIMITS.options}`))
     return false
   }
-  if (q.correct == null) {
+  // a poll has no answer key. Still an error for a graded quiz, though: silently
+  // accepting an unmarked question would make it unanswerable at run time.
+  if (graded && q.correct == null) {
     errors.push(err(q.line, `"${trunc(q.text)}" has no correct answer — mark one option with *`))
     return false
   }
@@ -76,13 +79,13 @@ function checkQuestion(q, errors) {
     errors.push(err(q.line, `"${trunc(q.text)}" marks ${q.correctCount} correct answers — mark exactly one with *`))
     return false
   }
-  if (!(q.timer >= 1 && q.timer <= MAX_TIMER)) {
-    errors.push(err(q.line, `"${trunc(q.text)}" has a timer of ${q.timer}s — use 1 to ${MAX_TIMER}`))
+  if (!(q.timer >= 1 && q.timer <= LIMITS.timer)) {
+    errors.push(err(q.line, `"${trunc(q.text)}" has a timer of ${q.timer}s — use 1 to ${LIMITS.timer}`))
     return false
   }
   const codeLen = (q.code || []).join('\n').length
-  if (codeLen > MAX_CODE) {
-    errors.push(err(q.line, `The code block on "${trunc(q.text)}" is ${codeLen} characters — the maximum is ${MAX_CODE}`))
+  if (codeLen > LIMITS.code) {
+    errors.push(err(q.line, `The code block on "${trunc(q.text)}" is ${codeLen} characters — the maximum is ${LIMITS.code}`))
     return false
   }
   if (q.image && !/^https?:\/\//i.test(q.image)) {
@@ -103,14 +106,14 @@ const clean = (q) => {
   return out
 }
 
-function parseText(input) {
+function parseText(input, graded) {
   const questions = []
   const errors = []
   let cur = null
   let fencedAt = 0        // line the open ``` sits on, 0 when not inside a block
 
   const flush = () => {
-    if (cur && checkQuestion(cur, errors)) questions.push(clean(cur))
+    if (cur && checkQuestion(cur, errors, graded)) questions.push(clean(cur))
     cur = null
   }
 
@@ -182,7 +185,7 @@ function parseText(input) {
   return { questions, errors }
 }
 
-function parseJson(input) {
+function parseJson(input, graded) {
   const errors = []
   let data
   try {
@@ -208,32 +211,61 @@ function parseJson(input) {
       const hit = options.findIndex((o) => o.toLowerCase() === correct.trim().toLowerCase())
       correct = hit < 0 ? null : hit
     }
-    if (typeof correct !== 'number' || !Number.isInteger(correct) || correct < 0 || correct >= options.length) {
-      errors.push(err(at, `Question ${at} ("${trunc(text)}") has no valid correct answer`))
-      return
+    const validCorrect = typeof correct === 'number' && Number.isInteger(correct) &&
+      correct >= 0 && correct < options.length
+    if (!validCorrect) {
+      if (graded) {
+        errors.push(err(at, `Question ${at} ("${trunc(text)}") has no valid correct answer`))
+        return
+      }
+      correct = null            // a poll question simply has no answer key
     }
     const codeStr = typeof raw?.code === 'string' ? raw.code.replace(/\s+$/, '') : ''
     const q = {
-      text, options, correct, correctCount: 1,
+      text, options, correct, correctCount: correct == null ? 0 : 1,
       timer: Number(raw?.timer) || DEFAULT_TIMER, line: at,
       code: codeStr ? codeStr.split('\n') : [],
       image: typeof raw?.image === 'string' && raw.image.trim() ? raw.image.trim() : null,
     }
-    if (checkQuestion(q, errors)) questions.push(clean(q))
+    if (checkQuestion(q, errors, graded)) questions.push(clean(q))
   })
   return { questions, errors }
 }
 
-export function parseQuiz(input) {
+/** The inverse of parseText: render questions back into the paste format, so a
+ *  whole quiz can be re-edited as text instead of field by field.
+ *  formatQuiz -> parseQuiz round-trips. */
+export function formatQuiz(questions) {
+  return (questions || [])
+    .filter((q) => (q.text || '').trim())
+    .map((q) => {
+      const out = [`${q.text.trim()} [${Number(q.timer) || DEFAULT_TIMER}]`]
+      if ((q.code || '').trim()) {
+        out.push('```', ...String(q.code).replace(/\s+$/, '').split(/\r?\n/), '```')
+      }
+      if ((q.image || '').trim()) out.push(`!${String(q.image).trim()}`)
+      // blank options are dropped here, so `correct` is matched on the ORIGINAL
+      // index — using the shifted one silently marks a different answer correct
+      q.options
+        .map((o, i) => ({ text: (o || '').trim(), correct: q.correct != null && i === q.correct }))
+        .filter((o) => o.text)
+        .forEach((o) => out.push(`${o.correct ? '*' : '-'} ${o.text}`))
+      return out.join('\n')
+    })
+    .join('\n\n')
+}
+
+export function parseQuiz(input, graded = true) {
   const text = (input || '').trim()
   if (!text) return { questions: [], errors: [err(1, 'Nothing to import — paste some questions first')] }
 
-  const { questions, errors } = /^[[{]/.test(text) ? parseJson(text) : parseText(text)
+  const { questions, errors } = /^[[{]/.test(text)
+    ? parseJson(text, graded) : parseText(text, graded)
 
-  if (questions.length > MAX_QUESTIONS) {
+  if (questions.length > LIMITS.questions) {
     return {
-      questions: questions.slice(0, MAX_QUESTIONS),
-      errors: [...errors, err(0, `Only the first ${MAX_QUESTIONS} of ${questions.length} questions were kept — that is the maximum per quiz`)],
+      questions: questions.slice(0, LIMITS.questions),
+      errors: [...errors, err(0, `Only the first ${LIMITS.questions} of ${questions.length} questions were kept — that is the maximum per quiz`)],
     }
   }
   return { questions, errors }

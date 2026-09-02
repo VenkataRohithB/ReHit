@@ -18,10 +18,20 @@ link the host console shows (with QR).
 
 1. Admin logs in → **dashboard** lists **your saved quizzes**, any game still
    running (which you can resume), and recent finished games → **New quiz**
-   builds one (name, capacity, per-question timer, correct option).
+   builds one (name, capacity, per-question timer, correct option). Finish with
+   **Save for later** — it lands on the dashboard and starts nothing — or
+   **Save & start now**, which also opens a room. Building a quiz never commits
+   you to hosting it, so you can prep the night before and run it in class.
 2. Host console shows the room code, join link + QR, and a live lobby where
    players bubble in as they join.
-3. Players open the link, enter a unique email, land in the lobby.
+3. Players open the link, enter a unique email, land in the lobby. **Latecomers
+   are not locked out** — the link works for the whole quiz, and someone joining
+   while a question is live drops straight into it with the time that is left.
+   They score from where they walked in: questions asked before they arrived are
+   worth nothing to them, so there is still one leaderboard under one set of
+   rules. Their CSV row leaves those questions blank rather than marking them
+   wrong, so you can tell "arrived late" from "got it wrong". Only the room's
+   capacity still applies, and a finished quiz can no longer be joined.
 4. Host clicks **Start**. Each question appears **on its own first** for a few
    seconds' reading time — no options, nothing being timed — then the options
    open and the answer clock starts. A 25s question runs as 5s reading + 20s
@@ -32,7 +42,9 @@ link the host console shows (with QR).
    1. **Results** — every option with the percentage that chose it, correct
       answer highlighted. Press **Show leaderboard →**.
    2. **Leaderboard** — top 15 from rank 1, with **animated overtakes** and
-      movement arrows. Press **Next question →** (or **← Back to results**).
+      movement arrows. The join QR sits in the corner here, since this is the
+      last screen before the next question and latecomers can still scan in.
+      Press **Next question →** (or **← Back to results**).
 
    Nothing is on a timer, so you can talk through each screen for as long as you
    like.
@@ -47,6 +59,40 @@ all keep you logged in and drop you back into the room you were hosting. A playe
 rejoins their seat with their score and, mid-question, their locked-in answer.
 Reconnecting with the same email takes over the old session rather than being
 refused — last device in wins.
+
+## How a quiz runs — six switches
+
+Under the quiz name in the builder is one line describing how this quiz behaves,
+and a **Change** link. There are no modes, only six independent switches; a
+"feedback poll" is just several of them set together. The default of every one is
+what the app has always done, so ignoring this entirely changes nothing.
+
+| Switch | Options |
+|---|---|
+| **Players join by** | their email · a name they choose · nothing (anonymous) |
+| **Answers are** | graded · a poll, with no right answer |
+| **Each question** | runs on its timer · stays open until you close it |
+| **Points** | faster is worth more · faster than the rest of the room · flat · none |
+| **After each one** | show the correct answer · keep it hidden |
+| **Leaderboard** | after every question · only at the end · never |
+
+Three of these settle themselves, because the alternative is meaningless: a poll
+has nothing to score, no scoring has nothing to rank, and a question with no clock
+cannot measure absolute speed (it uses *faster than the room* instead). Switches
+that cannot matter grey out rather than vanish.
+
+**Joining by name** requires it to be unused in that room — a clash is refused so
+you never get two people called "Priya" in one export. Refreshing still returns
+you to your own seat and score; the browser remembers which chair is yours, so
+you never have to retype your way back in. **Anonymous** asks for nothing at all
+and hands out a readable name like *Swift Otter*, so the lobby and leaderboard
+still work as something to watch.
+
+**Stays open until you close it** replaces the countdown with a stopwatch counting
+*up*, and the question runs until you press **Finish question**. It does not close
+itself when everyone has answered — the point is to let a discussion breathe. Pair
+it with *faster than the rest of the room*, which scores on the gap between the
+first answer in and the moment you closed it.
 
 ## Bulk-adding questions
 
@@ -123,7 +169,8 @@ In preference order:
 3. **A paid ngrok plan**, if you already have one.
 
 Check your **room capacity** too — the number set in the builder is a hard cap,
-and the person who trips it sees "Room is full" on the join screen. Set it
+and the person who trips it sees "Room is full" on the join screen — that check
+applies to latecomers mid-quiz too, so leave headroom for stragglers. Set it
 comfortably above your class size.
 
 ### Pre-flight, ten minutes before class
@@ -165,7 +212,11 @@ component specs and motion timings. Tokens live in `frontend/src/index.css`
 under `@theme`; components use the generated utilities, never raw hex.
 
 Scoring is speed-based (fast correct ≈ 1000, slow correct ≈ 500, wrong 0);
-leaderboard ties break by earliest cumulative answer time.
+equal scores **share a rank** rather than being separated. Ranks are dense, so
+the board reads 1, 1, 2 with no gaps, and a two-way tie for first means there is
+no second place — both names share the top step of the podium and the confetti.
+Cumulative answer time still orders people *within* a tie, so the board is
+stable, but it no longer decides who beat whom.
 
 ## Local dev (hot reload)
 
@@ -203,15 +254,16 @@ scoring.
 | `ADVANCE_TIMEOUT_SECS` | `900` | backstop only — if the host abandons the game, the room continues after this so it can finish and be reaped |
 | `ROOM_TTL_SECS` | `3600` | reap ended / abandoned rooms from memory after this |
 | `DB_PATH` | `quiz.db` | sqlite file holding saved quizzes and game history |
-| `HISTORY_LIMIT` | `10` | finished games kept (and listed); older ones roll off with their CSV |
-| `SAVED_QUIZZES` | `10` | saved quiz definitions kept; oldest-used roll off |
+| `HISTORY_LIMIT` | `200` | finished games kept (and listed); older ones roll off with their CSV |
+| `SAVED_QUIZZES` | `200` | saved quiz definitions kept; oldest-used roll off, **taking their questions with them** |
 | `MAX_QUESTIONS` / `MAX_OPTIONS` / `MAX_CAPACITY` / `MAX_TIMER` | `50` / `6` / `1000` / `300` | validation bounds |
 | `CORS_ORIGINS` | `*` | comma-separated allowed origins |
 
 ## The dashboard
 
-One list, newest first. Every quiz you create is **kept automatically** under its
-name — there is no separate save step. Each row shows the name, question count,
+One list, newest first. Every quiz you build is **kept automatically** under its
+name — both builder buttons save, and neither needs a separate save step. Each
+row shows the name, question count,
 when it last ran, how many played and who won, with:
 
 - **Re-run** — starts a fresh room from the same questions
@@ -235,10 +287,15 @@ holds the things worth keeping: **saved quizzes** and **finished games**, so the
 dashboard and old CSV downloads survive a restart. Compose mounts a `quiz-data`
 volume for the database.
 
-Both tables **roll over**: only the 10 most recent are kept (`SAVED_QUIZZES` and
-`HISTORY_LIMIT`), so the file never grows without bound. Note that a game rolling
-off history takes its CSV with it — raise `HISTORY_LIMIT` if you need results kept
-for longer.
+Both tables **roll over**: only the 200 most recent are kept (`SAVED_QUIZZES` and
+`HISTORY_LIMIT`), so the file never grows without bound.
+
+Rolling off is a real delete, and quietly asymmetric on the dashboard: a game
+rolling off history takes its CSV with it, and a **quiz** rolling off takes its
+questions. The dashboard row survives either way — so the quiz still *looks*
+listed and its CSV still downloads — but **Re-run** disappears, because there is
+nothing left to run. These limits were 10 each, which is low enough to lose a
+quiz you were still using; keep them well above however many you build.
 
 ## Scaling note
 
