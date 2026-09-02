@@ -1,3 +1,5 @@
+import { LIMITS } from './parseQuiz.js'
+
 /** Thrown when the server rejects our token — the app clears the session on this. */
 export class AuthError extends Error {}
 
@@ -17,7 +19,9 @@ export async function login(username, password) {
     body: JSON.stringify({ username, password }),
   })
   if (!r.ok) throw new Error('Invalid credentials')
-  return r.json()          // { token, read_secs }
+  const body = await r.json()          // { token, read_secs, limits }
+  Object.assign(LIMITS, body.limits)   // the server's bounds win over our defaults
+  return body
 }
 
 /** Save a quiz. `run` false saves it without spawning a room, and resolves to

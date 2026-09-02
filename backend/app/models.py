@@ -53,6 +53,30 @@ class QuestionIn(BaseModel):
             raise ValueError("image must be an http:// or https:// URL")
         return v
 
+    @model_validator(mode="before")
+    @classmethod
+    def _blank_options(cls, data):
+        """Drop blank options, and move `correct` with its own option.
+
+        Before the field validators, because dropping a blank shifts every index
+        after it: strip without remapping and a blank sitting above the answer
+        silently promotes the option below it. The browser used to do this remap
+        on its own, which left every other client posting here — a script, a
+        re-save, a second UI — with a quietly wrong answer key.
+        """
+        if not isinstance(data, dict) or not isinstance(data.get("options"), list):
+            return data
+        opts = data["options"]
+        kept = [i for i, o in enumerate(opts) if isinstance(o, str) and o.strip()]
+        correct = data.get("correct")
+        if isinstance(correct, int) and not isinstance(correct, bool) \
+                and 0 <= correct < len(opts):
+            if correct not in kept:
+                raise ValueError("the option marked correct is blank")
+            correct = kept.index(correct)
+        # out-of-range indexes are left alone for _correct_in_range to reject
+        return {**data, "options": [opts[i].strip() for i in kept], "correct": correct}
+
     @field_validator("options")
     @classmethod
     def _options(cls, v):

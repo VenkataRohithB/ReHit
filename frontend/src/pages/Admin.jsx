@@ -43,8 +43,21 @@ const SWITCHES = [
   ['board', 'Leaderboard', [['always', 'After every question'], ['end', 'Only at the end'],
     ['never', 'Never']]],
 ]
-/* Mirrors the server's dependency rules: a switch that cannot matter is greyed
-   out rather than hidden, so nothing silently disappears while you are reading. */
+/* Faithful port of clean_mode (backend/app/game.py): the same three dependency
+   rules, in the same order. The server re-applies them on save and again when the
+   room is built — this is display only, so the builder shows the quiz that will
+   actually run rather than the buttons that were clicked. Without it a poll still
+   reads "Faster is worth more", and an open question still claims absolute speed. */
+const settle = (m) => {
+  const out = { ...m }
+  if (out.grading === 'feedback') out.scoring = 'none'
+  if (out.scoring === 'none') out.board = 'never'
+  if (out.timing === 'open' && out.scoring === 'absolute') out.scoring = 'relative'
+  return out
+}
+
+/* A switch that cannot matter is greyed out rather than hidden, so nothing
+   silently disappears while you are reading. */
 const switchOff = (m) => ({
   scoring: m.grading === 'feedback',
   reveal: m.grading === 'feedback',
@@ -374,20 +387,16 @@ function Builder({ token, initial, onCreated, onCancel, onAuthFail }) {
       onCreated(await createQuiz(token, {
         title: title.trim(),
         capacity: Number(capacity),
-        mode,
-        questions: questions.map((q) => {
-          // dropping blank options shifts every index after them, so `correct`
-          // has to travel with its own option — otherwise a blank sitting above
-          // the right answer silently promotes the one below it
-          const kept = q.options.map((o, i) => ({ text: o.trim(), was: i })).filter((o) => o.text)
-          return {
-            text: q.text.trim(), timer: Number(q.timer) || 20,
-            options: kept.map((o) => o.text),
-            correct: kept.findIndex((o) => o.was === q.correct),
-            code: q.code?.trim() ? q.code : null,   // omit the optional extras when unused
-            image: q.image?.trim() ? q.image.trim() : null,
-          }
-        }),
+        mode: settle(mode),
+        // options go up as typed: the server drops the blanks and moves `correct`
+        // with its own option, so that index shift is decided in exactly one place
+        questions: questions.map((q) => ({
+          text: q.text.trim(), timer: Number(q.timer) || 20,
+          options: q.options,
+          correct: q.correct,
+          code: q.code?.trim() ? q.code : null,   // omit the optional extras when unused
+          image: q.image?.trim() ? q.image.trim() : null,
+        })),
       }, run))
     } catch (e) {
       if (e instanceof AuthError) return onAuthFail()
@@ -425,7 +434,7 @@ function Builder({ token, initial, onCreated, onCancel, onAuthFail }) {
           default is what the app has always done and most quizzes never touch it. */}
       <div className="mb-6 mt-1">
         <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-sm text-muted">
-          <span className="font-semibold">{summarise(mode)}</span>
+          <span className="font-semibold">{summarise(settle(mode))}</span>
           <button onClick={() => setShowModes((s) => !s)}
             className="font-semibold text-anchor hover:underline">
             {showModes ? 'Done' : 'Change'}
@@ -443,7 +452,7 @@ function Builder({ token, initial, onCreated, onCancel, onAuthFail }) {
                   className={`flex flex-col gap-1 text-sm font-semibold
                     ${off ? 'opacity-40' : 'text-muted'}`}>
                   {label}
-                  <select value={String(mode[key])} disabled={off}
+                  <select disabled={off} value={String(settle(mode)[key])}
                     onChange={(e) => setMode((m) => {
                       const val = choices.find(([v]) => String(v) === e.target.value)[0]
                       return { ...m, [key]: val }

@@ -24,9 +24,11 @@
  * written for the person pasting, not for a developer.
  */
 
-export const MAX_QUESTIONS = 50
-export const MAX_OPTIONS = 6
-export const MAX_TIMER = 300
+/* The server owns these — login fills them in (see api.js). The values here are
+   only what config.py defaults to, so a paste checked before the first login is
+   still checked against something sane. The API re-validates regardless; these
+   exist to name the offending line instead of failing the whole save. */
+export const LIMITS = { questions: 50, options: 6, timer: 300, code: 2000 }
 export const DEFAULT_TIMER = 20
 
 export const EXAMPLE = `Which sorting algorithm has O(n log n) worst case? [20]
@@ -54,7 +56,6 @@ const OPTION_RE = /^\s*([-*])\s*(.+?)\s*$/
 const TIMER_RE = /\s*\[(\d+)\s*s?\]\s*$/i
 const FENCE_RE = /^\s*```/
 const IMAGE_RE = /^\s*!\s*(?:\[[^\]]*\]\()?\s*(https?:\/\/\S+?)\s*\)?\s*$/i
-const MAX_CODE = 2000
 
 const err = (line, msg) => ({ line, msg })
 
@@ -64,8 +65,8 @@ function checkQuestion(q, errors, graded) {
     errors.push(err(q.line, `"${trunc(q.text)}" needs at least 2 options`))
     return false
   }
-  if (q.options.length > MAX_OPTIONS) {
-    errors.push(err(q.line, `"${trunc(q.text)}" has ${q.options.length} options — the maximum is ${MAX_OPTIONS}`))
+  if (q.options.length > LIMITS.options) {
+    errors.push(err(q.line, `"${trunc(q.text)}" has ${q.options.length} options — the maximum is ${LIMITS.options}`))
     return false
   }
   // a poll has no answer key. Still an error for a graded quiz, though: silently
@@ -78,13 +79,13 @@ function checkQuestion(q, errors, graded) {
     errors.push(err(q.line, `"${trunc(q.text)}" marks ${q.correctCount} correct answers — mark exactly one with *`))
     return false
   }
-  if (!(q.timer >= 1 && q.timer <= MAX_TIMER)) {
-    errors.push(err(q.line, `"${trunc(q.text)}" has a timer of ${q.timer}s — use 1 to ${MAX_TIMER}`))
+  if (!(q.timer >= 1 && q.timer <= LIMITS.timer)) {
+    errors.push(err(q.line, `"${trunc(q.text)}" has a timer of ${q.timer}s — use 1 to ${LIMITS.timer}`))
     return false
   }
   const codeLen = (q.code || []).join('\n').length
-  if (codeLen > MAX_CODE) {
-    errors.push(err(q.line, `The code block on "${trunc(q.text)}" is ${codeLen} characters — the maximum is ${MAX_CODE}`))
+  if (codeLen > LIMITS.code) {
+    errors.push(err(q.line, `The code block on "${trunc(q.text)}" is ${codeLen} characters — the maximum is ${LIMITS.code}`))
     return false
   }
   if (q.image && !/^https?:\/\//i.test(q.image)) {
@@ -261,10 +262,10 @@ export function parseQuiz(input, graded = true) {
   const { questions, errors } = /^[[{]/.test(text)
     ? parseJson(text, graded) : parseText(text, graded)
 
-  if (questions.length > MAX_QUESTIONS) {
+  if (questions.length > LIMITS.questions) {
     return {
-      questions: questions.slice(0, MAX_QUESTIONS),
-      errors: [...errors, err(0, `Only the first ${MAX_QUESTIONS} of ${questions.length} questions were kept — that is the maximum per quiz`)],
+      questions: questions.slice(0, LIMITS.questions),
+      errors: [...errors, err(0, `Only the first ${LIMITS.questions} of ${questions.length} questions were kept — that is the maximum per quiz`)],
     }
   }
   return { questions, errors }

@@ -471,7 +471,11 @@ class Room:
 
     async def _reveal(self, i, q):
         self.state = "results"
-        graded = q.get("correct") is not None
+        # the mode has the final say: a quiz flipped to `feedback` still carries
+        # the answer indexes it was built with, and reading gradedness off the
+        # question alone would ship that key to every phone in a room that was
+        # told it has no right answer
+        graded = self.mode["grading"] == "graded" and q.get("correct") is not None
         score = self._scorer()
         tally = [0] * len(q["options"])
         for email, p in self.players.items():

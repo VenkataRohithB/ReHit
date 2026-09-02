@@ -117,8 +117,12 @@ def login(req: LoginReq):
         hmac.compare_digest(req.password, settings.admin_pass)
     if not ok:
         raise HTTPException(401, "Invalid credentials")
-    # read_secs travels with the session so the builder can show the timer split
-    return {"token": make_token(), "read_secs": settings.read_secs}
+    # read_secs and the bounds travel with the session: the paste box pre-checks
+    # against them so it can point at the offending line, and hardcoding a second
+    # copy in the browser means an env-tuned limit quietly disagrees with the API
+    return {"token": make_token(), "read_secs": settings.read_secs,
+            "limits": {"questions": settings.max_questions, "options": settings.max_options,
+                       "timer": settings.max_timer, "code": settings.max_code_chars}}
 
 
 @app.post("/api/quiz")

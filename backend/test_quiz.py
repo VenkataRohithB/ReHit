@@ -356,13 +356,6 @@ def test_history_roundtrip():
     assert store.csv_for("NOPE00") == (None, "")
 
 
-if __name__ == "__main__":
-    for name, fn in list(globals().items()):
-        if name.startswith("test_"):
-            fn()
-    print("all engine tests passed")
-
-
 def test_mode_defaults_to_todays_behaviour():
     """An old sqlite row, a missing key or junk all come back as the quiz that
     used to run. /api/quizzes/{id}/run never touches pydantic, so this is the
@@ -496,3 +489,51 @@ def test_board_and_answer_are_omitted_not_nulled():
     assert "correct" not in poll.last_results and "leaderboard" not in poll.last_results
     assert poll.players["a"].score == 0, "a poll scores nothing"
     assert poll.last_results["tally"] == [0, 1], "but it still counts the votes"
+
+
+def test_blank_options_move_the_answer_key_with_them():
+    """The browser used to do this remap on its own; any other client posting
+    here got a silently wrong answer key. Now the API owns it."""
+    from app.models import QuestionIn
+    import pydantic
+
+    # the blank sits ABOVE the answer, so a naive strip promotes "Rome"
+    q = QuestionIn(text="Capital of France?", options=["", "Paris", "Rome"], correct=1)
+    assert q.options == ["Paris", "Rome"]
+    assert q.options[q.correct] == "Paris", q.options[q.correct]
+
+    # blanks below the answer, and several of them, leave it where it is
+    q = QuestionIn(text="Q?", options=["  ", "a", "", "b", "  "], correct=1)
+    assert q.options == ["a", "b"] and q.options[q.correct] == "a"
+
+    # marking a blank correct is a mistake, not a silent conversion to a poll
+    try:
+        QuestionIn(text="Q?", options=["", "a", "b"], correct=0)
+        raise AssertionError("a blank marked correct must be rejected")
+    except pydantic.ValidationError as e:
+        assert "blank" in str(e)
+
+    # a poll keeps no answer key, and still drops its blanks
+    q = QuestionIn(text="Q?", options=["a", "", "b"], correct=None)
+    assert q.options == ["a", "b"] and q.correct is None
+
+
+def test_login_ships_the_limits_the_api_enforces():
+    """The paste box pre-checks against these; a hardcoded second copy in the
+    browser would quietly disagree with the API once one is env-tuned."""
+    from app.config import settings
+    from app.main import login
+    from app.models import LoginReq
+
+    body = login(LoginReq(username=settings.admin_user, password=settings.admin_pass))
+    assert body["limits"] == {
+        "questions": settings.max_questions, "options": settings.max_options,
+        "timer": settings.max_timer, "code": settings.max_code_chars,
+    }
+
+
+if __name__ == "__main__":
+    for name, fn in list(globals().items()):
+        if name.startswith("test_"):
+            fn()
+    print("all engine tests passed")
