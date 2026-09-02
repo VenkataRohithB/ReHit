@@ -8,7 +8,7 @@ import { parseQuiz, formatQuiz, EXAMPLE } from '../lib/parseQuiz.js'
 import { useSocket } from '../lib/useSocket.js'
 import {
   Screen, JoinStrip, Button, TimerRing, OptionKey, ResultBars, RaceBoard,
-  WinnerFinale, LobbyPills, QuestionMedia, tone, useStopwatch, clock,
+  WinnerFinale, LobbyPills, QuestionMedia, PollColumns, tone, useStopwatch, clock,
 } from '../ui.jsx'
 
 const TOKEN_KEY = 'quiz.token'
@@ -32,7 +32,8 @@ const SWITCHES = [
   ['identity', 'Players join by', [['email', 'Their email'], ['name', 'A name they choose'],
     ['anonymous', 'Nothing — anonymous']]],
   ['grading', 'Answers are', [['graded', 'Graded — one is correct'],
-    ['feedback', 'A poll — no right answer']]],
+    ['feedback', 'A poll — no right answer'],
+    ['livepoll', 'A live poll — bars fill as they answer']]],
   ['timing', 'Each question', [['countdown', 'Runs on its timer'],
     ['open', 'Stays open until I close it']]],
   ['scoring', 'Points', [['absolute', 'Faster is worth more'],
@@ -50,7 +51,9 @@ const SWITCHES = [
    reads "Faster is worth more", and an open question still claims absolute speed. */
 const settle = (m) => {
   const out = { ...m }
-  if (out.grading === 'feedback') out.scoring = 'none'
+  if (out.grading === 'feedback' || out.grading === 'livepoll') out.scoring = 'none'
+  // a live poll is closed by the host, never by a clock
+  if (out.grading === 'livepoll') out.timing = 'open'
   if (out.scoring === 'none') out.board = 'never'
   if (out.timing === 'open' && out.scoring === 'absolute') out.scoring = 'relative'
   return out
@@ -59,9 +62,10 @@ const settle = (m) => {
 /* A switch that cannot matter is greyed out rather than hidden, so nothing
    silently disappears while you are reading. */
 const switchOff = (m) => ({
-  scoring: m.grading === 'feedback',
-  reveal: m.grading === 'feedback',
-  board: m.grading === 'feedback' || m.scoring === 'none',
+  scoring: m.grading !== 'graded',
+  reveal: m.grading !== 'graded',
+  timing: m.grading === 'livepoll',   // the host closes a live poll
+  board: m.grading !== 'graded' || m.scoring === 'none',
 })
 const summarise = (m) => SWITCHES
   .map(([k, , opts]) => (opts.find(([v]) => v === m[k]) || [])[1])
@@ -108,18 +112,31 @@ function Login({ onToken }) {
       onToken(token)
     } catch { setErr('Those credentials did not work') }
   }
+  const field = `w-full rounded-2xl border-2 border-line bg-canvas px-4 py-3.5
+    outline-none transition placeholder:text-muted/50 focus:border-anchor`
   return (
     <Screen>
-      <form onSubmit={submit} className="m-auto flex w-full max-w-sm flex-col gap-3">
-        <h1 className="mb-2 text-3xl font-extrabold tracking-tight">Quiz Live</h1>
-        <input value={u} onChange={(e) => setU(e.target.value)} placeholder="Username"
-          aria-label="Username"
-          className="rounded-2xl border-2 border-line px-4 py-3 outline-none focus:border-anchor" />
-        <input type="password" value={p} onChange={(e) => setP(e.target.value)} placeholder="Password"
-          aria-label="Password"
-          className="rounded-2xl border-2 border-line px-4 py-3 outline-none focus:border-anchor" />
-        <Button type="submit">Log in</Button>
-        {err && <p role="alert" className="font-semibold text-rose-ink">{err}</p>}
+      <form onSubmit={submit} className="m-auto flex w-full max-w-sm flex-col gap-4">
+        <div className="mb-2">
+          <h1 className="text-[clamp(2rem,6vw,2.75rem)] font-extrabold tracking-tight">Quiz Live</h1>
+          <p className="mt-1 font-semibold text-muted">Sign in to build and host a quiz.</p>
+        </div>
+        <label className="flex flex-col gap-1.5">
+          <span className="text-xs font-semibold uppercase tracking-[.1em] text-muted">Username</span>
+          <input value={u} onChange={(e) => setU(e.target.value)} placeholder="Admin"
+            aria-label="Username" className={field} />
+        </label>
+        <label className="flex flex-col gap-1.5">
+          <span className="text-xs font-semibold uppercase tracking-[.1em] text-muted">Password</span>
+          <input type="password" value={p} onChange={(e) => setP(e.target.value)}
+            placeholder="••••••••" aria-label="Password" className={field} />
+        </label>
+        <Button type="submit" className="mt-1 py-4 text-lg">Log in</Button>
+        {err && (
+          <p role="alert" className="rounded-xl bg-rose px-4 py-3 font-semibold text-rose-ink">
+            {err}
+          </p>
+        )}
       </form>
     </Screen>
   )
@@ -251,41 +268,63 @@ function Dashboard({ token, onNew, onEdit: openInBuilder, onOpen, onAuthFail }) 
 
       {!data && <p className="text-muted">Loading…</p>}
       {data && !data.rows.length && (
-        <div className="rounded-2xl border border-line p-8 text-center">
-          <p className="font-semibold">Nothing here yet.</p>
-          <p className="mt-1 text-sm text-muted">
-            Every quiz you create is kept here, ready to run again.
+        <div className="rounded-2xl border border-dashed border-line px-8 py-12 text-center">
+          <p className="text-lg font-extrabold">No quizzes yet</p>
+          <p className="mx-auto mt-1.5 max-w-sm text-sm text-muted">
+            Build one and it stays here, ready to run again with a fresh room code
+            whenever you need it.
           </p>
+          <Button onClick={onNew} className="mt-5">Build your first quiz</Button>
         </div>
       )}
 
+      {/* Title leads, everything about it sits underneath — the old single line
+          gave the name, the counts and the winner all the same weight, so a list
+          of ten quizzes read as one block of text. The whole row re-runs; the ⋯
+          keeps the rarer actions without competing for the click. */}
       <div className="flex flex-col gap-2">
-        {data?.rows.map((row) => (
-          <div key={row.quiz_id ?? row.code}
-            className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-2xl bg-track px-4 py-3">
-            <span className="font-extrabold">{row.title}</span>
-            <span className="text-sm font-semibold tabular-nums text-muted">
-              {row.questions} question{row.questions === 1 ? '' : 's'} · {when(row.last_run)}
-              {row.players != null && ` · ${row.players} player${row.players === 1 ? '' : 's'}`}
-            </span>
-            {row.winner && (
-              <span className="flex items-center gap-1.5 rounded-full bg-butter px-3 py-1
-                text-sm font-semibold text-butter-ink">
-                Winner {(row.winner.name || '?').split('@')[0]}
-                <b className="font-extrabold tabular-nums">{row.winner.score}</b>
+        {data?.rows.map((row) => {
+          const id = row.quiz_id ?? row.code
+          const canRun = row.quiz_id != null
+          return (
+            <div key={id}
+              onClick={canRun && !busy ? () => rerun(row) : undefined}
+              className={`group flex items-center gap-4 rounded-2xl border border-transparent
+                bg-track px-4 py-3.5 transition
+                ${canRun ? 'cursor-pointer hover:border-line hover:bg-canvas' : ''}`}>
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
+                  <span className="truncate text-[1.05rem] font-extrabold">{row.title}</span>
+                  {row.winner && (
+                    <span className="flex items-center gap-1.5 rounded-full bg-butter px-2.5 py-0.5
+                      text-xs font-semibold text-butter-ink">
+                      🏆 {(row.winner.name || '?').split('@')[0]}
+                      <b className="font-extrabold tabular-nums">{row.winner.score}</b>
+                    </span>
+                  )}
+                </div>
+                <p className="mt-0.5 text-sm font-semibold tabular-nums text-muted">
+                  {row.questions} question{row.questions === 1 ? '' : 's'} · {when(row.last_run)}
+                  {row.players != null && ` · ${row.players} player${row.players === 1 ? '' : 's'}`}
+                </p>
+              </div>
+              {busy === row.quiz_id ? (
+                <span className="text-sm font-semibold text-anchor">Starting…</span>
+              ) : canRun && (
+                <span className="hidden text-sm font-extrabold text-anchor group-hover:inline">
+                  Run again →
+                </span>
+              )}
+              <span onClick={(e) => e.stopPropagation()}>
+                <RowMenu row={row} open={menu === id}
+                  onRerun={() => rerun(row)}
+                  onToggle={() => setMenu((m) => (m === id ? null : id))}
+                  onEdit={() => edit(row)} onCsv={() => grab(row.code)}
+                  onDelete={() => remove(row)} />
               </span>
-            )}
-            <span className="flex-1" />
-            {busy === row.quiz_id && (
-              <span className="text-sm font-semibold text-anchor">Starting…</span>
-            )}
-            <RowMenu row={row} open={menu === (row.quiz_id ?? row.code)}
-              onRerun={() => rerun(row)}
-              onToggle={() => setMenu((m) => (m === (row.quiz_id ?? row.code)
-                ? null : (row.quiz_id ?? row.code)))}
-              onEdit={() => edit(row)} onCsv={() => grab(row.code)} onDelete={() => remove(row)} />
-          </div>
-        ))}
+            </div>
+          )
+        })}
       </div>
     </div>
   )
@@ -440,30 +479,46 @@ function Builder({ token, initial, onCreated, onCancel, onAuthFail }) {
             {showModes ? 'Done' : 'Change'}
           </button>
         </div>
+        {/* Segmented rows rather than dropdowns: six selects hid every choice
+            behind a click, so nobody discovered the modes existed. Laid out flat,
+            the whole grammar of a quiz reads in one glance — and a switch the
+            others have settled greys out in place instead of vanishing. */}
         {showModes && (
-          <div className="mt-3 flex flex-wrap gap-x-6 gap-y-3 rounded-2xl border border-line p-4">
+          <div className="mt-3 flex flex-col gap-4 rounded-2xl border border-line
+            bg-track/40 p-[clamp(1rem,2vw,1.5rem)]">
+            <h3 className="text-xs font-semibold uppercase tracking-[.1em] text-muted">
+              How this quiz runs
+            </h3>
             {SWITCHES.map(([key, label, opts]) => {
               const off = switchOff(mode)[key]
               // absolute speed needs a fixed window, which an open question has not
               const choices = key === 'scoring' && mode.timing === 'open'
                 ? opts.filter(([v]) => v !== 'absolute') : opts
+              const current = settle(mode)[key]
               return (
-                <label key={key}
-                  className={`flex flex-col gap-1 text-sm font-semibold
-                    ${off ? 'opacity-40' : 'text-muted'}`}>
-                  {label}
-                  <select disabled={off} value={String(settle(mode)[key])}
-                    onChange={(e) => setMode((m) => {
-                      const val = choices.find(([v]) => String(v) === e.target.value)[0]
-                      return { ...m, [key]: val }
+                <div key={key} className={off ? 'opacity-45' : ''}>
+                  <div className="mb-1.5 flex items-baseline gap-2">
+                    <span className="text-sm font-semibold text-ink">{label}</span>
+                    {off && <span className="text-xs font-medium text-muted">
+                      settled by the choices above
+                    </span>}
+                  </div>
+                  <div role="group" aria-label={label} className="flex flex-wrap gap-1.5">
+                    {choices.map(([v, text]) => {
+                      const on = v === current
+                      return (
+                        <button key={String(v)} type="button" disabled={off}
+                          aria-pressed={on}
+                          onClick={() => setMode((m) => ({ ...m, [key]: v }))}
+                          className={`rounded-full px-3.5 py-2 text-sm font-semibold transition
+                            enabled:hover:brightness-95 disabled:cursor-not-allowed
+                            ${on ? 'bg-anchor text-white' : 'bg-canvas text-muted border border-line'}`}>
+                          {text}
+                        </button>
+                      )
                     })}
-                    className="rounded-lg border-2 border-line bg-canvas px-2 py-1.5 font-semibold
-                      text-ink outline-none focus:border-anchor">
-                    {choices.map(([v, text]) => (
-                      <option key={String(v)} value={String(v)}>{text}</option>
-                    ))}
-                  </select>
-                </label>
+                  </div>
+                </div>
               )
             })}
           </div>
@@ -580,6 +635,30 @@ function Builder({ token, initial, onCreated, onCancel, onAuthFail }) {
   )
 }
 
+/* How much of the room is in. The bar matters more than the words: a host
+   glancing up from the class needs "are they done yet" in one look, and the
+   count alone made them read two numbers and divide. */
+function Answered({ answered, total }) {
+  const frac = total ? Math.min(1, answered / total) : 0
+  const done = total > 0 && answered >= total
+  return (
+    <span className="flex min-w-0 flex-1 flex-col gap-1.5">
+      <span className="flex items-baseline gap-3">
+        <b className={`text-[clamp(1.6rem,4vw,3.4rem)] font-extrabold tabular-nums
+          ${done ? 'text-mint-ink' : ''}`}>{answered}</b>
+        <span className="font-semibold text-muted">
+          of {total} answered{done ? ' — everyone is in' : ''}
+        </span>
+      </span>
+      <span className="h-1.5 w-[min(22rem,60%)] overflow-hidden rounded-full bg-track">
+        <span className={`block h-full rounded-full transition-[width,background-color]
+          duration-500 ease-out ${done ? 'bg-mint-ink' : 'bg-anchor'}`}
+          style={{ width: `${frac * 100}%` }} />
+      </span>
+    </span>
+  )
+}
+
 /* ============================ host console ============================ */
 function Host({ token, code, onExit, onAuthFail }) {
   const [lobby, setLobby] = useState({ players: [], count: 0, capacity: 0 })
@@ -607,13 +686,21 @@ function Host({ token, code, onExit, onAuthFail }) {
   const onMsg = useCallback((m) => {
     switch (m.type) {
       case 'error': if (m.msg === 'Room not found') onExit(); break
-      case 'lobby': setLobby(m); break
+      // `waiting` is the between-questions lobby — the server holds the room
+      // there until the host starts the next question
+      case 'lobby': setLobby(m); if (m.state === 'waiting') setPhase('waiting'); break
       case 'question':
         // the reading-phase payload has no options; merge so the later reveal fills them in
         setQuestion((q) => (q && q.index === m.index ? { ...q, ...m } : m))
-        if (m.phase !== 'reading') setProgress({ answered: 0, total: 0 })
+        // seed from the payload: the console used to sit on "0 of 0 answered"
+        // until the first tap, which is exactly when you most want the number
+        if (m.phase !== 'reading') setProgress({ answered: m.answered ?? 0, total: m.players ?? 0 })
         setPhase('question'); break
-      case 'progress': setProgress(m); break
+      case 'progress':
+        setProgress(m)
+        // a live poll's columns arrive on this message; hold them on the question
+        if (m.tally) setQuestion((q) => (q ? { ...q, tally: m.tally } : q))
+        break
       // one payload drives both insight screens; the host steps through them
       case 'results': setResults(m); setPhase('bars'); break
       case 'game_over': setOver(m); setPhase('over'); break
@@ -622,7 +709,12 @@ function Host({ token, code, onExit, onAuthFail }) {
   }, [onExit])
 
   const { status, send } = useSocket(wsUrl(`/ws/host/${code}?token=${token}`), onMsg)
-  const players = phase === 'lobby' ? `${lobby.count} / ${lobby.capacity} joined` : `${lobby.count} players`
+  const waiting = phase === 'waiting'
+  // the question about to be asked, 1-based. `question` still holds the one just
+  // finished, so the next is its index + 2
+  const nextQ = question ? question.index + 2 : null
+  const players = phase === 'lobby' || waiting
+    ? `${lobby.count} / ${lobby.capacity} joined` : `${lobby.count} players`
 
   const grab = async () => {
     try { await downloadCsv(token, code) } catch (e) { if (e instanceof AuthError) onAuthFail() }
@@ -662,7 +754,12 @@ function Host({ token, code, onExit, onAuthFail }) {
     <Screen>
       <JoinStrip code={code} right={players} host={publicHost} />
 
-      {phase === 'lobby' && (
+      {/* The same screen opens the quiz and gates every question after it: the
+          room code and a QR big enough to scan from a seat, who is in, and one
+          button that does not move until the host presses it. Between questions
+          that is the whole point — latecomers get a door, and nobody is halfway
+          through reading Q4 when it appears. */}
+      {(phase === 'lobby' || phase === 'waiting') && (
         <div className="grid flex-1 grid-cols-1 items-stretch gap-6 md:grid-cols-[minmax(0,31%)_1fr]">
           <div className="flex flex-col items-center justify-center gap-3 rounded-3xl bg-track p-6">
             <span className="text-xs font-semibold uppercase tracking-[.1em] text-muted">Room code</span>
@@ -696,17 +793,24 @@ function Host({ token, code, onExit, onAuthFail }) {
             <p className="text-[clamp(1rem,1.8vw,1.5rem)] font-semibold text-muted">
               <b className="text-[1.25em] font-extrabold text-ink tabular-nums">{lobby.count}</b>
               {' '}of {lobby.capacity} joined — waiting for you to start
+              {waiting && nextQ && (
+                <span className="ml-1">· question {nextQ} of {question?.total ?? '—'} is next</span>
+              )}
             </p>
             {lobby.count
               ? <LobbyPills players={lobby.players} />
               : <p className="flex-1 text-muted">No one has joined yet.</p>}
             <div className="flex items-center gap-3">
-              <Button onClick={() => send({ type: 'start' })} disabled={!lobby.count}
-                className="text-lg">Start the quiz</Button>
-              <button onClick={onExit}
-                className="rounded-xl px-3 py-2 text-sm font-semibold text-muted hover:text-ink">
-                Back
-              </button>
+              <Button className="text-lg" disabled={!lobby.count}
+                onClick={() => send({ type: waiting ? 'begin' : 'start' })}>
+                {waiting ? `Start question ${nextQ} →` : 'Start the quiz'}
+              </Button>
+              {!waiting && (
+                <button onClick={onExit}
+                  className="rounded-xl px-3 py-2 text-sm font-semibold text-muted hover:text-ink">
+                  Back
+                </button>
+              )}
             </div>
           </div>
         </div>
@@ -729,25 +833,26 @@ function Host({ token, code, onExit, onAuthFail }) {
             </div>
           ) : (
             <>
-              <div className="grid flex-1 grid-cols-1 gap-3 sm:grid-cols-2">
-                {question.options.map((o, i) => {
-                  const t = tone(i)
-                  return (
-                    <div key={i} style={{ animationDelay: `${i * 70}ms` }}
-                      className={`anim-pop flex items-center gap-3 rounded-2xl px-5
-                        text-[clamp(1rem,2vw,1.9rem)] font-semibold ${t.fill} ${t.ink}`}>
-                      <OptionKey>{t.key}</OptionKey>{o}
-                    </div>
-                  )
-                })}
-              </div>
+              {/* a live poll fills its columns as the taps land; every other
+                  question just shows the options and keeps the counts private */}
+              {question.tally ? (
+                <PollColumns tally={question.tally} options={question.options} />
+              ) : (
+                <div className="grid flex-1 grid-cols-1 gap-3 sm:grid-cols-2">
+                  {question.options.map((o, i) => {
+                    const t = tone(i)
+                    return (
+                      <div key={i} style={{ animationDelay: `${i * 70}ms` }}
+                        className={`anim-pop flex items-center gap-3 rounded-2xl px-5
+                          text-[clamp(1rem,2vw,1.9rem)] font-semibold ${t.fill} ${t.ink}`}>
+                        <OptionKey>{t.key}</OptionKey>{o}
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
               <div className="flex flex-none items-center justify-between gap-4">
-                <span className="flex items-baseline gap-3">
-                  <b className="text-[clamp(1.6rem,4vw,3.4rem)] font-extrabold tabular-nums">
-                    {progress.answered}
-                  </b>
-                  <span className="font-semibold text-muted">of {progress.total} answered</span>
-                </span>
+                <Answered {...progress} />
                 {/* on a clock, the ring counts down and closes it. Open, the clock
                     counts up and the only thing that closes it is this button. */}
                 {question.remaining != null ? (
@@ -759,7 +864,7 @@ function Host({ token, code, onExit, onAuthFail }) {
                       {clock(openFor)}
                     </b>
                     <Button onClick={next} disabled={advancing} className="flex-none">
-                      Finish question →
+                      {question.tally ? 'Close poll →' : 'Finish question →'}
                     </Button>
                   </span>
                 )}
@@ -779,7 +884,12 @@ function Host({ token, code, onExit, onAuthFail }) {
           </div>
           {/* keep the snippet on screen while the room discusses the answer */}
           <QuestionMedia code={results.code} image={results.image} className="max-h-[26vh]" />
-          <ResultBars tally={results.tally} options={results.options} correct={results.correct} />
+          {/* a live poll settles into the columns it just filled, rather than
+              swapping to a different chart of the same numbers */}
+          {results.poll || question?.tally
+            ? <PollColumns tally={results.tally} options={results.options} />
+            : <ResultBars tally={results.tally} options={results.options}
+                correct={results.correct} />}
           <div className="flex flex-none items-center justify-between gap-4">
             <span className="font-semibold text-muted">
               {results.correct != null
@@ -789,7 +899,8 @@ function Host({ token, code, onExit, onAuthFail }) {
             </span>
             {/* one forward button, whatever comes next — with no leaderboard to show,
                 this is the only thing that advances the room */}
-            <Button onClick={results.leaderboard ? () => setPhase('board') : next}
+            <Button onClick={results.leaderboard
+              ? () => { send({ type: 'board' }); setPhase('board') } : next}
               disabled={!results.leaderboard && advancing} className="flex-none">
               {results.leaderboard ? 'Show leaderboard →'
                 : results.last ? 'Show final results' : 'Next question →'}
@@ -811,13 +922,19 @@ function Host({ token, code, onExit, onAuthFail }) {
           <div className="flex flex-none items-center justify-between gap-4">
             {/* the last screen before the next question, so it is where a
                 latecomer gets a chance to scan in — players may join any time */}
-            <div className="flex items-center gap-3">
+            {/* the only moment a latecomer gets to scan, so it has to be
+                readable from a seat — the old 44px thumbnail was decorative */}
+            <div className="flex items-center gap-4">
               {qr && <img src={qr} alt={`QR code to join room ${code}`}
-                className="w-[clamp(2.75rem,5vw,4.25rem)] flex-none rounded-lg" />}
+                className="w-[clamp(7rem,14vw,11rem)] flex-none rounded-xl" />}
               <span className="font-semibold text-muted">
-                Top {results.leaderboard.length} of {results.total_players} players
-                <span className="block text-[.85em] font-medium">
+                <span className="block text-[clamp(1.4rem,3vw,2.4rem)] font-extrabold
+                  tracking-[.12em] text-anchor">{code}</span>
+                <span className="block text-[clamp(.85rem,1.5vw,1.15rem)]">
                   Scan to join — you can come in at any point
+                </span>
+                <span className="block text-[.85em] font-medium">
+                  Top {results.leaderboard.length} of {results.total_players} players
                 </span>
               </span>
             </div>

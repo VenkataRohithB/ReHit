@@ -27,7 +27,7 @@ async def _hang_up(ws):
 # come back as the quiz that used to run.
 MODES = {
     "identity": ("email", "name", "anonymous"),
-    "grading":  ("graded", "feedback"),
+    "grading":  ("graded", "feedback", "livepoll"),
     "scoring":  ("absolute", "relative", "flat", "none"),
     "reveal":   (True, False),
     "board":    ("always", "end", "never"),
@@ -52,8 +52,12 @@ def clean_mode(m):
     """
     m = m or {}
     out = {k: (m.get(k) if m.get(k) in vals else vals[0]) for k, vals in MODES.items()}
-    if out["grading"] == "feedback":
+    if out["grading"] in ("feedback", "livepoll"):
         out["scoring"] = "none"
+    if out["grading"] == "livepoll":
+        # the columns fill as the room answers and the host closes it when the
+        # answers stop coming — a countdown would cut the discussion off
+        out["timing"] = "open"
     if out["scoring"] == "none":
         out["board"] = "never"
     if out["timing"] == "open" and out["scoring"] == "absolute":
@@ -100,6 +104,15 @@ def dense_ranks(ranking):
             last = p.score
         out[p.email] = rank
     return out
+
+
+def tally_of(responses, n_options):
+    """Votes per option. record_answer has already proved every index is in
+    range, so this never has to defend against a stray one."""
+    counts = [0] * n_options
+    for opt, _ in responses.values():
+        counts[opt] += 1
+    return counts
 
 
 def absent_answer():
@@ -170,6 +183,9 @@ class Room:
         # away cannot pin a room in memory forever
         self.advance_timeout = advance_timeout
         self.advance = asyncio.Event()
+        # a separate event from `advance` on purpose: sharing one would let a
+        # double-tap on "Next question" fall straight through the waiting room
+        self.begin = asyncio.Event()
         self.players: dict[str, Player] = {}
         self.hosts = set()
         self.state = "lobby"          # lobby | reading | question | results | ended
@@ -184,8 +200,12 @@ class Room:
         self.created = time.time()
         self.ended_at = None
         self.prev_rank: dict[str, int] = {}   # email -> rank after the previous question
+        # the room sees the standings when the host reveals them, not the instant
+        # they are computed — reset per question in run()
+        self.board_shown = False
         # snapshots so a reconnecting client can be put back on the right screen
         self.last_results = None
+        self.last_board = None       # the `board` payload, withheld until shown
         self.last_ranks: dict[str, int] = {}
         self.final_msg = None
 
@@ -267,6 +287,7 @@ class Room:
         # closes it, and relative scoring measures the spread rather than a ceiling
         self.responses[email] = (opt, min(t, self.answer_len) if self.timed else t)
         self.check_all_answered()
+        return True
 
     def check_all_answered(self):
         """Close the question early only when every *connected* player answered.
@@ -297,7 +318,11 @@ class Room:
                 "count": len(self.players), "capacity": self.capacity,
                 "state": self.state, "title": self.title}
 
-    def question_msg(self):
+    def question_msg(self, host=False):
+        """`host=True` adds the console's numbers. They are withheld from phones
+        on purpose: the live tally would let a late answerer follow the crowd,
+        which is the one thing a poll must not allow. A phone gets the question,
+        the options and its own answer — nothing about the rest of the room."""
         q = self.questions[self.q_index]
         reading = self.state == "reading"
         ends = self.read_ends if reading else self.q_ends
@@ -317,7 +342,46 @@ class Room:
             msg["elapsed"] = max(0.0, round(time.time() - self.q_start, 2))
         if not reading:
             msg["options"] = q["options"]        # withheld until the reveal
+        if host and not reading:
+            # so the console opens on "0 of 24 answered" rather than "0 of 0" and
+            # never has to wait for the first answer to learn the room size
+            msg["answered"] = len(self.responses)
+            msg["players"] = len(self.players)
+            if self.mode["grading"] == "livepoll":
+                msg["tally"] = tally_of(self.responses, len(q["options"]))
         return msg
+
+    async def broadcast_question(self):
+        """One question, two payloads — the console's carries the room's numbers,
+        the phones' carries only what the player is allowed to know."""
+        await self._fan_out([(p, self.question_msg())
+                             for p in list(self.players.values()) if p.ws])
+        await self.send_hosts(self.question_msg(host=True))
+
+    def progress_msg(self):
+        """Host-only. `players` rather than the connected count: phones sleep and
+        drop mid-question, and a total that slides downward reads as broken."""
+        msg = {"type": "progress", "answered": len(self.responses),
+               "total": len(self.players)}
+        if self.mode["grading"] == "livepoll" and 0 <= self.q_index < len(self.questions):
+            # the live columns. Hosts only — this never reaches a phone
+            msg["tally"] = tally_of(self.responses,
+                                    len(self.questions[self.q_index]["options"]))
+        return msg
+
+    def board_msg_for(self, player):
+        """The standings, once the host has called for them."""
+        if not self.last_board:
+            return None
+        return {**self.last_board, "your_rank": self.last_ranks.get(player.email, 0)}
+
+    def show_board(self):
+        """Host pressed "Show leaderboard". Returns False when there is nothing
+        to show, so a stray click on a poll cannot fake a payload."""
+        if self.state != "results" or not self.last_board:
+            return False
+        self.board_shown = True
+        return True
 
     def results_msg_for(self, player):
         """Rebuild the results screen for someone who reconnected into it."""
@@ -326,6 +390,8 @@ class Room:
         if self.mode["scoring"] == "none":
             return dict(self.last_results)     # nothing personal to add to a poll
         gained = player.answers[-1]["points"] if player.answers else 0
+        # last_results is the PLAYER view: personal numbers only. The standings
+        # live in last_board and go out separately, when the host asks for them.
         return {**self.last_results, "your_score": player.score,
                 "your_rank": self.last_ranks.get(player.email, 0), "gained": gained}
 
@@ -339,6 +405,13 @@ class Room:
                 msg = {**msg, "your_answer": self.responses[player.email][0]}
             return msg
         if self.state == "results":
+            # mid-leaderboard, a refresh must come back to the leaderboard rather
+            # than dropping a beat to the results bars. The live push is a lean
+            # `board` that the client merges into what it already has; a resume
+            # has nothing to merge into, so it carries the whole screen.
+            if self.board_shown:
+                return {**(self.results_msg_for(player) or {}),
+                        **self.board_msg_for(player)}
             return self.results_msg_for(player)
         if self.state == "ended":
             return self.final_msg
@@ -386,21 +459,31 @@ class Room:
             for i, q in enumerate(self.questions):
                 self.q_index = i
                 self.responses = {}
+                self.board_shown = False
                 self.all_answered = asyncio.Event()
                 self.read_len, self.answer_len = split_timer(q["timer"], self.read_secs)
+
+                # Every question opens the way the quiz did: the room back on the
+                # join screen, latecomers scanning in, and nothing moving until
+                # the host says everyone is ready. Skipped for the first question
+                # — the opening lobby already is that gate.
+                if i:
+                    self.state = "waiting"
+                    await self.broadcast(self.lobby_msg())
+                    await self._await_begin()
 
                 if self.read_len:
                     # question alone first — no options sent, so they cannot be
                     # read out of the payload before everyone can see them
                     self.state = "reading"
                     self.read_ends = time.time() + self.read_len
-                    await self.broadcast(self.question_msg())
+                    await self.broadcast_question()
                     await asyncio.sleep(self.read_len)
 
                 self.state = "question"
                 self.q_start = time.time()          # the clock that scoring uses
                 self.q_ends = self.q_start + self.answer_len
-                await self.broadcast(self.question_msg())
+                await self.broadcast_question()
                 if self.timed:
                     try:
                         await asyncio.wait_for(self.all_answered.wait(),
@@ -437,6 +520,23 @@ class Room:
         except asyncio.TimeoutError:
             logging.getLogger("quiz").info(
                 "room %s advanced itself after %ss — no host input", self.code, self.advance_timeout)
+
+    async def _await_begin(self):
+        """Hold on the between-questions lobby until the host starts it."""
+        self.begin.clear()
+        try:
+            await asyncio.wait_for(self.begin.wait(), timeout=self.advance_timeout)
+        except asyncio.TimeoutError:
+            logging.getLogger("quiz").info(
+                "room %s started itself after %ss — no host input",
+                self.code, self.advance_timeout)
+
+    def request_begin(self):
+        """Host pressed "Start question N" on the waiting screen."""
+        if self.state == "waiting":
+            self.begin.set()
+            return True
+        return False
 
     def request_next(self):
         """Host pressed Next, or Finish on an open question.
@@ -477,7 +577,7 @@ class Room:
         # told it has no right answer
         graded = self.mode["grading"] == "graded" and q.get("correct") is not None
         score = self._scorer()
-        tally = [0] * len(q["options"])
+        tally = tally_of(self.responses, len(q["options"]))
         for email, p in self.players.items():
             resp = self.responses.get(email)
             if resp is None:
@@ -485,7 +585,6 @@ class Room:
                                   "correct": False, "points": 0})
                 continue
             opt, t = resp
-            tally[opt] += 1          # record_answer already proved this is in range
             correct = graded and opt == q["correct"]
             pts = score(correct, t)
             p.score += pts
@@ -506,9 +605,25 @@ class Room:
         # the clients draw what they are given, and know nothing about the mode
         if graded and self.mode["reveal"]:
             base["correct"] = q["correct"]
+        if self.mode["grading"] == "livepoll":
+            # so a console that reconnects into this screen still draws the poll
+            # columns rather than falling back to the graded bars
+            base["poll"] = True
+
+        # The standings are the host's to reveal. Sending them with the results
+        # put the whole leaderboard on every phone while the host was still on
+        # the bars, so the room had read the outcome before the projector showed
+        # it. The host payload carries them; the player payload does not, and
+        # show_board() releases them on the host's word.
+        self.last_results = base                     # player view, no standings
+        self.last_board = None
+        host_msg = base
         if self.mode["board"] == "always":
-            base["leaderboard"] = self.board(ranking)   # deltas vs previous question
-        self.last_results = base   # replayed to anyone who reconnects into this screen
+            board = self.board(ranking)              # deltas vs previous question
+            host_msg = {**base, "leaderboard": board}
+            self.last_board = {"type": "board", "index": i, "leaderboard": board,
+                               "total_players": len(self.players),
+                               "last": base["last"]}
         self.prev_rank = rank_of   # must come after board(), which reads the old ranks
         scored = self.mode["scoring"] != "none"
         await self._fan_out([
@@ -516,7 +631,15 @@ class Room:
                              "gained": p.answers[-1]["points"]} if scored else {})})
             for p in list(self.players.values()) if p.ws
         ])
-        await self.send_hosts(base)
+        await self.send_hosts(host_msg)
+
+    async def send_board(self):
+        """Release the standings to the room. Returns False when there are none."""
+        if not self.show_board():
+            return False
+        await self._fan_out([(p, self.board_msg_for(p))
+                             for p in list(self.players.values()) if p.ws])
+        return True
 
 
 class RoomManager:

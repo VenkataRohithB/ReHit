@@ -46,12 +46,20 @@ export default function Play() {
         // the server resolves the final name: anonymous mode assigns one, and a
         // typed one may have been trimmed
         setErr(''); setMyName(m.name); localStorage.setItem(SEAT, m.name); break
-      case 'lobby': setLobby(m); break
+      case 'lobby':
+        setLobby(m)
+        // between questions the room goes back to the join screen, so a phone
+        // still sitting on the last leaderboard comes back with it
+        if (m.state === 'waiting') { setView({ screen: 'lobby' }); setPicked(null); setPending(null) }
+        break
       case 'question':
         // your_answer is present when we refreshed after already answering
         setPicked(m.your_answer ?? null); setPending(null)
         setView({ screen: 'question', ...m }); break
       case 'results': setView({ screen: 'results', ...m }); break
+      // the standings arrive separately, when the host reveals them — merged in
+      // so the results screen keeps everything it was already showing
+      case 'board': setView((v) => ({ ...v, screen: 'results', ...m })); break
       case 'game_over': setView({ screen: 'over', ...m }); break
       default: break
     }
@@ -161,6 +169,9 @@ export default function Play() {
           </p>
           <p className="mt-4 font-semibold">Waiting for the host to start…</p>
           <p className="text-sm text-muted">{myName}</p>
+          {lobby.state === 'waiting' && (
+            <p className="text-sm text-muted">The next question is coming up.</p>
+          )}
         </div>
       )}
 
