@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS rooms (
   ended     REAL NOT NULL,
   questions INTEGER NOT NULL,
   players   INTEGER NOT NULL,
-  top       TEXT NOT NULL,   -- json [{email, score}] top 3
+  top       TEXT NOT NULL,   -- json [{name, score}] top 3
   csv       TEXT NOT NULL,   -- full export, rendered once at game end
   title     TEXT NOT NULL DEFAULT ''
 );
@@ -143,7 +143,10 @@ def recent(limit=10):
             "SELECT code, created, ended, questions, players, top, title "
             "FROM rooms ORDER BY ended DESC LIMIT ?", (limit,),
         ).fetchall()
-    return [{**dict(r), "top": json.loads(r["top"])} for r in rows]
+    # rooms archived before players had a `name` stored the winner under `email`;
+    # normalise on read so old history does not reach the UI missing a field
+    return [{**dict(r), "top": [{**t, "name": t.get("name") or t.get("email", "")}
+                                for t in json.loads(r["top"])]} for r in rows]
 
 
 def activity():

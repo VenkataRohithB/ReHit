@@ -258,7 +258,7 @@ function Dashboard({ token, onNew, onEdit: openInBuilder, onOpen, onAuthFail }) 
             {row.winner && (
               <span className="flex items-center gap-1.5 rounded-full bg-butter px-3 py-1
                 text-sm font-semibold text-butter-ink">
-                Winner {row.winner.name.split('@')[0]}
+                Winner {(row.winner.name || '?').split('@')[0]}
                 <b className="font-extrabold tabular-nums">{row.winner.score}</b>
               </span>
             )}

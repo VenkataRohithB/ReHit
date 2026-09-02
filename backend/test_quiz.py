@@ -345,6 +345,13 @@ def test_history_roundtrip():
     assert row["title"] == "Test quiz", row["title"]
     csv_text, title = store.csv_for("HIST01")
     assert "z@y.com" in csv_text and title == "Test quiz"
+    # a room archived before the email->name rename must still come back with a
+    # name — the dashboard reads winner.name and a missing one blanks the page
+    store.save(r, build_csv(r), [{"email": "old@y.com", "score": 5}])
+    row = next(x for x in store.recent(10) if x["code"] == "HIST01")
+    assert row["top"][0]["name"] == "old@y.com"
+    assert store.activity()[0]["winner"]["name"]
+
     store.save(r, build_csv(r), [])          # re-save must not raise on duplicate code
     assert store.csv_for("NOPE00") == (None, "")
 
