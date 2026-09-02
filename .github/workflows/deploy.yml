@@ -1,0 +1,102 @@
+name: Deploy
+
+# Deploys the pushed commit to the EC2 host over SSM Systems Manager.
+# There is no inbound port open on that box and no long-lived AWS key here:
+# the runner assumes an IAM role via GitHub's OIDC provider, and that role may
+# only send AWS-RunShellScript to this one instance.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  id-token: write   # required to mint the OIDC token
+  contents: read
+
+concurrency:
+  group: deploy-ec2
+  cancel-in-progress: false   # never interrupt a half-finished docker build
+
+env:
+  AWS_REGION: ap-south-1
+  INSTANCE_ID: i-071d2336550985631
+  ROLE_ARN: arn:aws:iam::119492371915:role/rehit-github-deploy
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Assume deploy role via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: gha-deploy-${{ github.run_id }}
+
+      - name: Build and restart on the host
+        run: |
+          set -euo pipefail
+
+          # Built as a literal heredoc so nothing expands on the runner - every
+          # $(...) below is meant to run on the EC2 box, not here.
+          REMOTE=$(cat <<'EOS'
+          set -euo pipefail
+          SHA="__SHA__"
+          cd /home/ubuntu/ReHit
+          git fetch --prune origin
+          git reset --hard "$SHA"
+
+          docker compose up -d --build
+
+          st=starting
+          for _ in $(seq 1 60); do
+            st=$(docker inspect -f '{{.State.Health.Status}}' rehit-app-1 2>/dev/null || echo starting)
+            [ "$st" = healthy ] && break
+            sleep 5
+          done
+          if [ "$st" != healthy ]; then
+            echo "container never became healthy (last state: $st)" >&2
+            docker compose logs --tail 80 app >&2
+            exit 1
+          fi
+
+          curl -fsS http://localhost:8000/api/health
+          docker image prune -f >/dev/null
+          echo "deployed $SHA"
+          EOS
+          )
+          REMOTE="sudo -u ubuntu bash -s <<'RUNAS'
+          ${REMOTE//__SHA__/${GITHUB_SHA}}
+          RUNAS"
+
+          PARAMS=$(jq -n --arg s "$REMOTE" '{commands: [$s]}')
+          CMD_ID=$(aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name AWS-RunShellScript \
+            --comment "deploy ${GITHUB_SHA:0:7}" \
+            --parameters "$PARAMS" \
+            --query 'Command.CommandId' --output text)
+          echo "SSM command: $CMD_ID"
+
+          # The build can take several minutes on a t3.small, which is longer
+          # than the built-in `ssm wait command-executed` waiter allows.
+          for _ in $(seq 1 120); do
+            STATUS=$(aws ssm get-command-invocation \
+              --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" \
+              --query 'Status' --output text 2>/dev/null || echo Pending)
+            case "$STATUS" in
+              Success|Failed|Cancelled|TimedOut) break ;;
+            esac
+            sleep 10
+          done
+
+          echo "--- stdout ---"
+          aws ssm get-command-invocation --command-id "$CMD_ID" \
+            --instance-id "$INSTANCE_ID" --query 'StandardOutputContent' --output text
+          echo "--- stderr ---"
+          aws ssm get-command-invocation --command-id "$CMD_ID" \
+            --instance-id "$INSTANCE_ID" --query 'StandardErrorContent' --output text
+
+          echo "final status: $STATUS"
+          [ "$STATUS" = Success ]
