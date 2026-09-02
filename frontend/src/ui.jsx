@@ -368,6 +368,63 @@ export function ResultBars({ tally, options, correct, settleMs = 1500 }) {
   )
 }
 
+/* Live poll columns — options across the X axis, responses up the Y.
+   A projected poll that the room answers in real time, so the shape has to read
+   from the back of a lecture hall: one column per option, growing upward as the
+   taps land.
+
+   Heights scale to the tallest column, not the total. Scaling to the total means
+   the first few votes are slivers a metre wide and nothing appears to happen —
+   the room needs to see movement on vote three, not vote thirty.
+
+   Deliberately host-only. There is no player equivalent and there should not be:
+   a phone showing the running count lets a late answerer follow the crowd. */
+export function PollColumns({ tally, options }) {
+  const peak = Math.max(1, ...tally)
+  const votes = tally.reduce((a, b) => a + b, 0)
+  return (
+    <div className="flex min-h-0 flex-1 items-stretch justify-center
+      gap-[clamp(.4rem,1.6vw,1.5rem)] px-[clamp(0rem,2vw,2rem)]">
+      {options.map((opt, i) => {
+        const t = tone(i)
+        const n = tally[i]
+        // a share of the tallest column, floored so an option nobody picked
+        // still shows a base to read its letter against
+        const h = `${Math.max(2, (n / peak) * 100)}%`
+        const pct = votes ? Math.round((n / votes) * 100) : 0
+        return (
+          <div key={i} className="flex h-full min-w-0 flex-1 flex-col
+            gap-[clamp(.2rem,.7vh,.55rem)]">
+            {/* The count gets its own fixed row at the top. Every column's number
+                then sits on one line — easier to compare across a projector than
+                numbers floating at different heights — and nothing the bar does
+                below can move it. */}
+            <span className={`flex-none text-center font-extrabold tabular-nums
+              text-[clamp(.9rem,3.4vh,2.4rem)] ${n ? t.ink : 'text-muted/40'}`}>
+              <Ticker to={n} ms={420} />
+            </span>
+            {/* The plot area. The bar is absolutely positioned inside it, so its
+                height is purely visual: at 100% it fills this box and stops.
+                As a flex sibling it grew past the column instead and printed
+                straight over the question above. */}
+            <div className="relative min-h-0 flex-1">
+              <div className={`absolute inset-x-0 bottom-0 rounded-t-2xl ${t.fill}`}
+                style={{ height: h, transition: still() ? 'none' : `height .55s ${CALM}` }} />
+            </div>
+            <span className="flex flex-none items-center justify-center gap-1.5
+              text-center font-semibold text-[clamp(.6rem,1.8vh,1.05rem)]">
+              <OptionKey className={t.ink}>{t.key}</OptionKey>
+              <span className="min-w-0 truncate">{opt}</span>
+            </span>
+            <span className="flex-none text-center font-semibold tabular-nums text-muted
+              text-[clamp(.55rem,1.4vh,.85rem)]">{pct}%</span>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 /* relative + z-10 so the racing bar fill behind it cannot paint over the arrow */
 function Arrow({ d }) {
   if (!d) return (
@@ -507,7 +564,7 @@ export function RaceBoard({ rows, meName, raceMs = 1900 }) {
     return (
       <div key={p.name} ref={(el) => el ? els.current.set(p.name, el) : els.current.delete(p.name)}
         className={`relative flex items-center gap-3 overflow-hidden rounded-xl ${medal}
-          px-3 py-[.4rem] text-[clamp(.7rem,1.05vw,.95rem)]
+          px-3 py-[clamp(.15rem,.5vh,.45rem)] text-[clamp(.7rem,2vh,1.25rem)]
           ${p.name === meName ? 'ring-2 ring-inset ring-anchor' : ''}`}>
         <div className={`absolute inset-y-0 left-0 ${fill}`}
           style={{
@@ -525,12 +582,14 @@ export function RaceBoard({ rows, meName, raceMs = 1900 }) {
     )
   }
 
-  /* two columns — 15 rows stacked pushes the host's Next button off a projector */
-  const half = Math.ceil(order.length / 2)
+  /* One sequence, 1..N straight down. Two columns fitted more rows but broke the
+     one thing a leaderboard is for: reading places in order. Rank 9 sat at the
+     top-right, level with rank 1, so the eye had to jump columns to follow the
+     order. Row type is sized in vh instead, so a full board still lands above
+     the host's button on a projector without splitting it. */
   return (
-    <div className="grid min-h-0 flex-1 grid-cols-1 content-center gap-x-6 gap-y-1.5 sm:grid-cols-2">
-      <div className="flex flex-col gap-1.5">{order.slice(0, half).map(row)}</div>
-      <div className="flex flex-col gap-1.5">{order.slice(half).map(row)}</div>
+    <div className="flex min-h-0 flex-1 flex-col justify-center gap-[clamp(.15rem,.5vh,.45rem)]">
+      {order.map(row)}
     </div>
   )
 }

@@ -239,6 +239,8 @@ async def ws_play(ws: WebSocket, code: str, seat: str = Query(...), name: str = 
         # may have trimmed what was typed
         await ws.send_json({"type": "joined", "name": player.name, "state": room.state})
         await room.broadcast(room.lobby_msg())
+        # someone walking in mid-question changes "answered of N"
+        await room.send_hosts(room.progress_msg())
         # put them back on whatever screen the room is showing, not just questions
         resume = room.resume_msg_for(player)
         if resume:
@@ -256,9 +258,8 @@ async def ws_play(ws: WebSocket, code: str, seat: str = Query(...), name: str = 
                 await ws.send_json({"type": "pong"})
             elif kind == "answer":
                 room.record_answer(seat, data.get("option"))
-                await room.send_hosts({"type": "progress",
-                                       "answered": len(room.responses),
-                                       "total": room.connected_count()})
+                # carries the live tally too when this is a poll — hosts only
+                await room.send_hosts(room.progress_msg())
     finally:
         # only clear if we are still the live socket — a reconnect that took this
         # player over already installed its own, and must not be unregistered here
@@ -271,6 +272,7 @@ async def ws_play(ws: WebSocket, code: str, seat: str = Query(...), name: str = 
             # answer clock in run() already bounds the wait; let it do that.
             with contextlib.suppress(Exception):
                 await room.broadcast(room.lobby_msg())
+                await room.send_hosts(room.progress_msg())
 
 
 @app.websocket("/ws/host/{code}")
@@ -289,9 +291,11 @@ async def ws_host(ws: WebSocket, code: str, token: str = Query(...)):
         await ws.send_json(room.lobby_msg())
         # a host who refreshes mid-game lands back on the current screen too
         if room.state in ("reading", "question"):
-            await ws.send_json(room.question_msg())
+            await ws.send_json(room.question_msg(host=True))
         elif room.state == "results" and room.last_results:
-            await ws.send_json(room.last_results)
+            await ws.send_json({**room.last_results,
+                                **({"leaderboard": room.last_board["leaderboard"]}
+                                   if room.last_board else {})})
         elif room.state == "ended" and room.final_msg:
             await ws.send_json(room.final_msg)
 
@@ -309,6 +313,12 @@ async def ws_host(ws: WebSocket, code: str, token: str = Query(...)):
                 await ws.send_json({"type": "pong"})
             elif kind == "start" and manager.start(room):
                 await ws.send_json({"type": "started"})
+            elif kind == "begin":
+                room.request_begin()
+            elif kind == "board":
+                # the room sees the leaderboard on the host's word, not the
+                # instant it was computed
+                await room.send_board()
             elif kind == "next":
                 room.request_next()
     finally:

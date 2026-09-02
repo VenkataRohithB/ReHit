@@ -475,18 +475,26 @@ def test_board_and_answer_are_omitted_not_nulled():
         asyncio.run(r._reveal(0, r.questions[0]))
         return r
 
-    on = reveal({}).last_results
-    assert "correct" in on and "leaderboard" in on
+    # last_results is the PLAYER view and never carries the standings — the host
+    # reveals those. last_board holds them until show_board() releases them.
+    default = reveal({})
+    assert "correct" in default.last_results
+    assert "leaderboard" not in default.last_results, "the room must not get it early"
+    assert default.last_board["leaderboard"][0]["score"] > 0
 
-    hidden = reveal({"reveal": False}).last_results
-    assert "correct" not in hidden, "reveal:false must not ship the answer at all"
-    assert hidden["leaderboard"][0]["score"] > 0, "hiding the answer must still score"
+    hidden = reveal({"reveal": False})
+    assert "correct" not in hidden.last_results, "reveal:false must not ship the answer"
+    assert hidden.last_board["leaderboard"][0]["score"] > 0, "hiding the answer still scores"
 
     at_end = reveal({"board": "end"})
-    assert "leaderboard" not in at_end.last_results, "board:end shows nothing per question"
+    assert at_end.last_board is None, "board:end shows nothing per question"
+
+    live = reveal({"grading": "livepoll"})
+    assert live.last_results["poll"] is True, "a console reconnecting still draws columns"
+    assert "poll" not in default.last_results, "and a graded quiz is not flagged as one"
 
     poll = reveal({"grading": "feedback"})
-    assert "correct" not in poll.last_results and "leaderboard" not in poll.last_results
+    assert "correct" not in poll.last_results and poll.last_board is None
     assert poll.players["a"].score == 0, "a poll scores nothing"
     assert poll.last_results["tally"] == [0, 1], "but it still counts the votes"
 
@@ -530,6 +538,152 @@ def test_login_ships_the_limits_the_api_enforces():
         "questions": settings.max_questions, "options": settings.max_options,
         "timer": settings.max_timer, "code": settings.max_code_chars,
     }
+
+
+def test_the_room_sees_the_leaderboard_only_when_the_host_reveals_it():
+    """The host steps results -> leaderboard. Sending the standings with the
+    results put them on every phone while the projector was still on the bars."""
+    import asyncio
+    r = mkroom()
+    r.answer_len = 20
+    r.players["a"] = Player("a")
+    r.q_start = time.time()
+    r.responses["a"] = (1, 1.0)
+    asyncio.run(r._reveal(0, r.questions[0]))
+
+    p = r.players["a"]
+    assert "leaderboard" not in r.results_msg_for(p), "not before the host says so"
+    assert not r.board_shown
+    assert r.resume_msg_for(p)["type"] == "results", "a refresh stays on the bars"
+
+    assert r.show_board() is True
+    assert r.board_shown
+    board = r.board_msg_for(p)
+    assert board["type"] == "board" and board["leaderboard"][0]["score"] > 0
+    assert board["your_rank"] == 1
+    resumed = r.resume_msg_for(p)
+    assert resumed["type"] == "board", "a refresh now returns to it"
+    # and rebuilds the whole screen, not just the standings
+    assert resumed["leaderboard"] and resumed["options"] == ["a", "b", "c"]
+    assert resumed["your_score"] == p.score
+
+    # a poll has no standings, so a stray click cannot manufacture a payload
+    poll = Room("P", 60, r.questions, advance_timeout=900, mode={"grading": "feedback"})
+    poll.state = "results"
+    assert poll.show_board() is False
+
+
+def test_live_poll_forces_its_own_shape():
+    """`livepoll` is ungraded and host-closed: a countdown would cut the room
+    off mid-thought, and there is nothing to score or rank."""
+    from app.game import clean_mode
+    m = clean_mode({"grading": "livepoll", "timing": "countdown", "scoring": "absolute",
+                    "board": "always"})
+    assert m["grading"] == "livepoll"
+    assert m["timing"] == "open", "the host closes a poll, not a clock"
+    assert m["scoring"] == "none" and m["board"] == "never"
+    # every other switch is still free
+    assert clean_mode({"grading": "livepoll", "identity": "anonymous"})["identity"] == "anonymous"
+
+
+def test_the_live_tally_reaches_the_host_and_never_a_phone():
+    """The whole point of a projected poll is that the room looks up. A phone
+    that could see the running count would also let a late answerer follow it."""
+    r = Room("T", 60, [{"text": "Q", "options": ["a", "b", "c"], "correct": None,
+                        "timer": 20}], advance_timeout=900, mode={"grading": "livepoll"})
+    r.state = "question"
+    r.q_index = 0
+    r.q_start = time.time()
+    for seat in ("a", "b", "c"):
+        r.players[seat] = Player(seat)
+    assert r.record_answer("a", 2) is True
+    r.record_answer("b", 2)
+
+    host = r.progress_msg()
+    assert host["tally"] == [0, 0, 2], host
+    assert host["answered"] == 2 and host["total"] == 3
+
+    # question_msg() with no argument is the PHONE payload. It is broadcast to
+    # every device in the room, so anything in it is public — the tally, the
+    # answered count and the room size all have to stay out of it.
+    for leak in ("tally", "answered", "players"):
+        assert leak not in r.question_msg(), f"a phone must not receive {leak!r}"
+    assert r.question_msg(host=True)["tally"] == [0, 0, 2], "but the console does"
+
+    # a non-poll never produces one at all, for either side
+    plain = Room("T2", 60, r.questions, advance_timeout=900, mode={"grading": "feedback"})
+    plain.state = "question"; plain.q_index = 0; plain.q_start = time.time()
+    plain.players["a"] = Player("a")
+    plain.record_answer("a", 1)
+    assert "tally" not in plain.question_msg(host=True)
+    assert "tally" not in plain.progress_msg()
+
+    graded = mkroom()
+    graded.state = "question"; graded.q_index = 0; graded.q_start = time.time()
+    graded.players["a"] = Player("a")
+    graded.record_answer("a", 1)
+    assert "tally" not in graded.question_msg(host=True)
+
+
+def test_the_host_knows_the_room_size_before_the_first_answer():
+    """The console used to read "0 of 0 answered" until someone tapped, and the
+    denominator then tracked live sockets, so it fell as phones went to sleep."""
+    r = mkroom()
+    r.state = "question"
+    r.q_index = 0
+    r.q_start = time.time()
+    for seat in ("a", "b", "c"):
+        r.players[seat] = Player(seat)
+
+    opened = r.question_msg(host=True)
+    assert opened["answered"] == 0 and opened["players"] == 3, opened
+
+    r.record_answer("a", 1)
+    assert r.progress_msg() == {"type": "progress", "answered": 1, "total": 3}
+    # nobody is connected in this test, so a connected-count denominator would
+    # have reported "1 of 0" here
+    assert r.connected_count() == 0
+
+
+def test_every_question_after_the_first_waits_for_the_host():
+    """The quiz opens on a lobby; so does every question after it. Latecomers
+    get a door between questions, and nothing starts until the host says go."""
+    import asyncio
+
+    async def drive():
+        r = mkroom(nq=2, timer=1)
+        r.read_secs = 0
+        r.players["a"] = Player("a")
+        task = asyncio.create_task(r.run())
+
+        # question 1 runs straight out of the opening lobby — no extra gate
+        await asyncio.sleep(0.05)
+        assert r.state == "question" and r.q_index == 0, r.state
+        r.record_answer("a", 1)
+        await asyncio.sleep(1.2)
+        assert r.state == "results", r.state
+
+        r.request_next()                       # leave the results
+        await asyncio.sleep(0.05)
+        # ...and the room is now HOLDING, not asking question 2
+        assert r.state == "waiting", r.state
+        assert r.q_index == 1, "queued up, but not started"
+
+        # someone can still walk in, and lands on the join screen
+        late, err = r.add_or_reconnect("late@x.edu")
+        assert err is None and late is not None
+        assert r.resume_msg_for(late) is None, "a joiner waits with everyone else"
+        assert r.lobby_msg()["state"] == "waiting"
+
+        assert r.request_begin() is True
+        await asyncio.sleep(0.05)
+        assert r.state == "question" and r.q_index == 1, r.state
+
+        # and `begin` outside the waiting screen does nothing
+        assert r.request_begin() is False
+        task.cancel()
+
+    asyncio.run(drive())
 
 
 if __name__ == "__main__":
