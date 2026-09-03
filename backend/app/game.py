@@ -290,12 +290,24 @@ class Room:
         return True
 
     def check_all_answered(self):
-        """Close the question early only when every *connected* player answered.
-        Recomputed on answer AND on disconnect so a drop can't strand the room."""
-        if self.state != "question" or self.connected_count() == 0:
+        """Close the question early only when EVERY player in the room answered.
+
+        It used to excuse whoever was disconnected, which is the same trap the
+        play handler already refuses to fall into on the disconnect side: on
+        classroom wifi a burst of drops shrinks "connected" to the handful who
+        already answered, and the next answer slams the question shut on
+        everyone still reconnecting — they come back to a question that is over
+        and score nothing. With 50 phones that is not an edge case, it is
+        Tuesday.
+
+        Counting the whole room instead means one dead phone makes the rest wait
+        out the clock. That wait is bounded by the answer window and the console
+        shows "49 of 50 answered" the whole time, which is a far better failure
+        than silently eating a third of the room's answers.
+        """
+        if self.state != "question" or not self.players:
             return
-        if all((p.ws is None) or (p.email in self.responses)
-               for p in self.players.values()):
+        if all(p.email in self.responses for p in self.players.values()):
             self.all_answered.set()
 
     # ---------- messages ----------
@@ -432,17 +444,26 @@ class Room:
         delay everyone behind it in the loop."""
         if not targets:
             return
-        oks = await asyncio.gather(*(self._send(p.ws, m) for p, m in targets),
-                                   return_exceptions=True)
-        for (p, _), ok in zip(targets, oks):
-            if ok is not True:
+        # Capture the socket each send actually goes to. The cleanup below runs
+        # after an await, and a phone that dropped and came straight back has a
+        # NEW socket on the player by then. Re-reading p.ws there would clear the
+        # fresh socket and hang up the reconnect that just succeeded — on
+        # classroom wifi, drop-and-rejoin during a broadcast is the normal case,
+        # so that kicked students out for as long as the room kept broadcasting.
+        sending = [(p, p.ws) for p, _ in targets]
+        oks = await asyncio.gather(
+            *(self._send(ws, m) for (_, ws), (_, m) in zip(sending, targets)),
+            return_exceptions=True)
+        for (p, ws), ok in zip(sending, oks):
+            # only if this is still the live socket — same guard the play handler
+            # uses when it unregisters, and for the same reason
+            if ok is not True and ws is not None and p.ws is ws:
                 # Forgetting the socket is not enough: the phone gets no close
                 # event, so it never reconnects and sits frozen on a stale
                 # question while the class moves on. Hang up properly and let
                 # its client come back and resume.
-                ws, p.ws = p.ws, None
-                if ws is not None:
-                    asyncio.create_task(_hang_up(ws))
+                p.ws = None
+                asyncio.create_task(_hang_up(ws))
 
     async def broadcast(self, msg):
         await self._fan_out([(p, msg) for p in list(self.players.values()) if p.ws])
@@ -468,6 +489,10 @@ class Room:
                 # the host says everyone is ready. Skipped for the first question
                 # — the opening lobby already is that gate.
                 if i:
+                    # cleared BEFORE the state goes live: request_begin() only
+                    # fires while state is "waiting", so nothing valid is lost,
+                    # and a press landing during the broadcast still counts
+                    self.begin.clear()
                     self.state = "waiting"
                     await self.broadcast(self.lobby_msg())
                     await self._await_begin()
@@ -480,6 +505,9 @@ class Room:
                     await self.broadcast_question()
                     await asyncio.sleep(self.read_len)
 
+                # an open question is closed by `next`; arm that gate before the
+                # state that accepts it becomes visible
+                self.advance.clear()
                 self.state = "question"
                 self.q_start = time.time()          # the clock that scoring uses
                 self.q_ends = self.q_start + self.answer_len
@@ -496,6 +524,7 @@ class Room:
                     # is done. Nothing awaits all_answered here, so setting it is
                     # a harmless no-op and needs no guard.
                     await self._await_host()
+                self.advance.clear()   # arm the results gate before _reveal opens it
                 await self._reveal(i, q)
                 await self._await_host()
 
@@ -513,8 +542,13 @@ class Room:
             pass
 
     async def _await_host(self):
-        """Hold on the insights screen until the host asks for the next question."""
-        self.advance.clear()
+        """Hold on the insights screen until the host asks for the next question.
+
+        Deliberately does NOT clear the event. Clearing here loses a press that
+        arrived while the state was already accepting one — and with a full class
+        the fan-out before this call takes long enough to make that likely. Each
+        gate clears its own event *before* opening, in run().
+        """
         try:
             await asyncio.wait_for(self.advance.wait(), timeout=self.advance_timeout)
         except asyncio.TimeoutError:
@@ -522,8 +556,11 @@ class Room:
                 "room %s advanced itself after %ss — no host input", self.code, self.advance_timeout)
 
     async def _await_begin(self):
-        """Hold on the between-questions lobby until the host starts it."""
-        self.begin.clear()
+        """Hold on the between-questions lobby until the host starts it.
+
+        Does not clear, for the same reason as _await_host: run() clears before
+        opening the gate, so a press cannot be swallowed in between.
+        """
         try:
             await asyncio.wait_for(self.begin.wait(), timeout=self.advance_timeout)
         except asyncio.TimeoutError:

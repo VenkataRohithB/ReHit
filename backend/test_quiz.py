@@ -8,7 +8,7 @@ os.environ.setdefault("DB_PATH", os.path.join(tempfile.gettempdir(), "quiz-test.
 os.environ.setdefault("ADMIN_PASS", "test-only")
 
 from app.game import (  # noqa: E402
-    Room, Player, score_answer, rank_players, build_csv, split_timer,
+    Room, Player, score_answer, rank_players, build_csv, split_timer, clean_mode,
 )
 
 
@@ -685,6 +685,227 @@ def test_every_question_after_the_first_waits_for_the_host():
         task.cancel()
 
     asyncio.run(drive())
+
+
+def test_a_host_press_during_the_fan_out_is_not_swallowed():
+    """The waiters used to clear their own event. By the time they ran, the
+    state accepting the press was already live and the broadcast to the room had
+    already yielded — so a host pressing during the fan-out had the press
+    cleared out from under them and the room hung until the 15-minute backstop.
+    With a full class the fan-out is slow enough to make that the normal case."""
+    import asyncio
+
+    async def drive():
+        r = mkroom(nq=2, timer=1)
+        r.read_secs = 0
+        r.players["a"] = Player("a")
+        task = asyncio.create_task(r.run())
+        await asyncio.sleep(0.05)
+        r.record_answer("a", 1)
+        await asyncio.sleep(1.2)
+        assert r.state == "results", r.state
+
+        # press the instant results exist — before run() reaches its waiter
+        assert r.request_next() is True
+        await asyncio.sleep(0.05)
+        assert r.state == "waiting", f"the press was swallowed: {r.state}"
+
+        # and again on the waiting gate, before _await_begin() gets scheduled
+        assert r.request_begin() is True
+        await asyncio.sleep(0.05)
+        assert r.state == "question" and r.q_index == 1, r.state
+        task.cancel()
+
+    asyncio.run(drive())
+
+
+def test_an_open_question_closes_on_a_press_made_the_moment_it_opens():
+    """Same race on the other gate: `next` closes an open question, and the
+    press can land while the question is still being fanned out."""
+    import asyncio
+
+    async def drive():
+        r = mkroom(nq=1, timer=1)
+        r.read_secs = 0
+        r.mode = clean_mode({"timing": "open"})
+        r.timed = False
+        r.players["a"] = Player("a")
+        task = asyncio.create_task(r.run())
+        await asyncio.sleep(0.05)
+        assert r.state == "question"
+        r.record_answer("a", 1)
+        assert r.request_next() is True
+        await asyncio.sleep(0.1)
+        assert r.state == "results", f"the open question never closed: {r.state}"
+        task.cancel()
+
+    asyncio.run(drive())
+
+
+def test_a_reconnect_during_a_broadcast_is_not_hung_up():
+    """The fan-out cleanup used to re-read player.ws AFTER awaiting the sends.
+    A phone that dropped and came straight back already had its NEW socket on
+    the player by then, so the cleanup for the DEAD send cleared the fresh
+    socket and hung it up. On classroom wifi that is the normal case, so a
+    student could be kicked out repeatedly for as long as the room broadcast."""
+    import asyncio
+
+    class DeadSock:
+        async def send_json(self, msg):
+            raise ConnectionError("this phone is already gone")
+
+        async def close(self):
+            pass
+
+    class LiveSock:
+        def __init__(self):
+            self.sent = []
+
+        async def send_json(self, msg):
+            self.sent.append(msg)
+
+        async def close(self):
+            raise AssertionError("the fresh socket must not be hung up")
+
+    async def drive():
+        r = mkroom()
+        p = Player("a")
+        dead, fresh = DeadSock(), LiveSock()
+        p.ws = dead
+        r.players["a"] = p
+
+        async def reconnect_mid_flight():
+            await asyncio.sleep(0)        # let the failing send be in flight
+            p.ws = fresh                  # the phone is back on a new socket
+
+        await asyncio.gather(r.broadcast({"type": "lobby"}), reconnect_mid_flight())
+        assert p.ws is fresh, "the reconnect was cleared by the dead send's cleanup"
+
+        # and a send that fails with no reconnect behind it still unregisters
+        p.ws = DeadSock()
+        await r.broadcast({"type": "lobby"})
+        assert p.ws is None, "a genuinely dead socket must still be dropped"
+
+    asyncio.run(drive())
+
+
+def test_a_drop_burst_cannot_slam_the_question_shut_on_reconnectors():
+    """The early close excused disconnected players, so when a third of the room
+    dropped, the remaining students answering ended the question — and the
+    reconnecting third came back to a finished question having scored nothing."""
+    r = mkroom()
+    r.state = "question"
+    r.q_index = 0
+    r.q_start = time.time()
+    r.answer_len = 20
+
+    live, dropped = [], []
+    for i in range(9):
+        p = Player(f"p{i}")
+        p.ws = object() if i < 6 else None      # 3 of 9 mid-reconnect
+        (live if p.ws else dropped).append(p)
+        r.players[p.email] = p
+
+    for p in live:
+        r.record_answer(p.email, 1)
+    assert not r.all_answered.is_set(), \
+        "the question closed while a third of the room was reconnecting"
+
+    # they come back and answer; now the whole room is in and it closes
+    for p in dropped:
+        p.ws = object()
+        r.record_answer(p.email, 1)
+    assert r.all_answered.is_set(), "a fully answered room must still close early"
+    assert len(r.responses) == 9, "every answer was kept"
+
+
+def test_report_carries_what_the_gradebook_csv_never_could():
+    """build_csv answers "what did each student score". The report has to answer
+    what was asked, what the room picked, and how each question performed —
+    none of which the CSV's q1_answer columns can express."""
+    import asyncio
+    from app.report import build_report, responses_csv, questions_csv
+
+    r = Room("RPT001", 60, [
+        {"text": "Capital of France?", "options": ["Paris", "Rome", "Berlin"],
+         "correct": 0, "timer": 20},
+        {"text": "2 + 2?", "options": ["3", "4"], "correct": 1, "timer": 20},
+    ], advance_timeout=900, title="Geography")
+    r.answer_len = 20
+    for seat in ("a", "b", "c"):
+        r.players[seat] = Player(seat)
+
+    # q1: a and b right, c pulled to the same wrong option
+    r.state = "question"; r.q_index = 0; r.q_start = time.time()
+    r.responses = {"a": (0, 1.0), "b": (0, 2.0), "c": (1, 3.0)}
+    asyncio.run(r._reveal(0, r.questions[0]))
+    # q2: a right, b wrong, c never answers
+    r.state = "question"; r.q_index = 1; r.q_start = time.time()
+    r.responses = {"a": (1, 1.0), "b": (0, 2.0)}
+    asyncio.run(r._reveal(1, r.questions[1]))
+    r.ended_at = time.time()
+
+    rep = build_report(r)
+    assert rep["quiz"]["title"] == "Geography" and rep["quiz"]["room_code"] == "RPT001"
+    assert rep["summary"]["participants"] == 3 and rep["summary"]["questions"] == 2
+
+    q1, q2 = rep["questions"]
+    assert q1["text"] == "Capital of France?", "the question text must be in the file"
+    assert q1["correct_option"] == "A" and q1["correct_answer"] == "Paris"
+    assert [o["count"] for o in q1["options"]] == [2, 1, 0]
+    assert q1["stats"]["percent_correct"] == 66.7 and q1["stats"]["difficulty"] == "moderate"
+    assert q1["stats"]["top_distractor"]["text"] == "Rome", "the wrong answer worth discussing"
+    assert q2["stats"]["skipped"] == 1, "someone in the room who did not answer"
+    assert rep["summary"]["hardest_question"] == 2
+
+    # a skipped question is not a wrong answer, and carries no fake option
+    c = next(p for p in rep["participants"] if p["name"] == "c")
+    assert c["responses"][1]["status"] == "skipped"
+    assert c["responses"][1]["answer"] is None and c["responses"][1]["points"] == 0
+
+    # one row per answer, question and answer text spelled out on every line
+    rows = responses_csv(rep).strip().splitlines()
+    assert len(rows) == 1 + 3 * 2, "a row per participant per question"
+    assert "Capital of France?" in rows[1] and "Paris" in rows[1]
+    # and one row per question
+    qrows = questions_csv(rep).strip().splitlines()
+    assert len(qrows) == 3
+    assert qrows[0].endswith("count_A,count_B,count_C"), "only as many columns as options"
+
+
+def test_report_survives_the_room_it_describes():
+    """The room is gone from memory minutes after it ends, so the report is
+    stored rendered rather than rebuilt on demand."""
+    from app import store
+    from app.report import build_report
+    store.init()
+    r = mkroom(nq=1)
+    r.code = "RPT002"
+    r.ended_at = time.time()
+    p = Player("z@y.com"); p.score = 900
+    p.answers = [{"option": 1, "time": 1.0, "correct": True, "points": 900}]
+    r.players["z@y.com"] = p
+
+    store.save(r, build_csv(r), [{"name": "z@y.com", "score": 900}], build_report(r))
+    got = store.report_for("RPT002")
+    assert got["quiz"]["room_code"] == "RPT002"
+    assert got["questions"][0]["text"] == "Q0", got["questions"][0]["text"]
+    assert got["participants"][0]["responses"][0]["answer"] == "b"
+    # a game archived before reports existed has none, and must not fake one
+    store.save(r, build_csv(r), [], None)
+    assert store.report_for("RPT002") is None
+    assert store.report_for("NOPE00") is None
+
+
+def test_a_formula_typed_as_a_name_cannot_run_in_a_spreadsheet():
+    """In name mode a student types their own name, and it lands in a file the
+    teacher opens in Excel. Numbers stay untouched — prefixing "-5" would
+    corrupt a perfectly good answer to a maths question."""
+    from app.report import _safe
+    assert _safe("=cmd|'/c calc'!A1").startswith("'"), "a formula must be defused"
+    assert _safe("@SUM(A1:A9)").startswith("'")
+    assert _safe("-5") == "-5" and _safe("+3.5") == "+3.5", "numbers are left alone"
+    assert _safe("Merge sort") == "Merge sort"
 
 
 if __name__ == "__main__":
