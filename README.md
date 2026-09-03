@@ -10,8 +10,8 @@ frontend. No database — state is in memory.
 docker compose up --build
 ```
 
-Open **http://localhost:8000** — admin login is `Admin` / `AUACAD@2026`
-(set via `ADMIN_PASS` in `docker-compose.yml`). Players join at the `/join/<CODE>`
+Open **http://localhost:8000** — admin login is `Admin` and whatever
+`ADMIN_PASS` you set (copy `.env.example` to `.env` first; it has no default). Players join at the `/join/<CODE>`
 link the host console shows (with QR).
 
 ## Flow
@@ -247,7 +247,7 @@ scoring.
 
 | Var | Default | Meaning |
 |-----|---------|---------|
-| `ADMIN_USER` / `ADMIN_PASS` | `Admin` / `AUACAD@2026` | admin credentials. Changing the password also invalidates every existing admin session, since the session signing key derives from it. |
+| `ADMIN_USER` / `ADMIN_PASS` | `Admin` / **required, no default** | admin credentials. Changing the password also invalidates every existing admin session, since the session signing key derives from it. |
 | `SECRET_KEY` | derived from the credentials | signs admin sessions; change it to invalidate all sessions |
 | `SESSION_SECS` | `43200` | how long an admin stays logged in (12h) |
 | `READ_SECS` | `5` | question shown alone before the options open; trimmed automatically so short questions keep at least 1s to answer |

@@ -34,6 +34,19 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
           role-session-name: gha-deploy-${{ github.run_id }}
 
+      - name: Sync app secrets into Parameter Store
+        env:
+          ADMIN_USER: ${{ secrets.ADMIN_USER }}
+          ADMIN_PASS: ${{ secrets.ADMIN_PASS }}
+        run: |
+          set -euo pipefail
+          # SSM replays command text verbatim in its history, so the secrets are
+          # NOT passed through send-command. They go here as SecureStrings and
+          # the host reads them back with its own instance role.
+          aws ssm put-parameter --name /rehit/admin_user --type SecureString --overwrite --value "$ADMIN_USER" >/dev/null
+          aws ssm put-parameter --name /rehit/admin_pass --type SecureString --overwrite --value "$ADMIN_PASS" >/dev/null
+          echo "secrets synced to /rehit/* (values never printed)"
+
       - name: Build and restart on the host
         run: |
           set -euo pipefail
@@ -46,6 +59,13 @@ jobs:
           cd /home/ubuntu/ReHit
           git fetch --prune origin
           git reset --hard "$SHA"
+
+          export PATH="$PATH:/snap/bin"
+          export AWS_DEFAULT_REGION=ap-southeast-1
+          get() { aws ssm get-parameter --name "$1" --with-decryption --query Parameter.Value --output text; }
+          ADMIN_USER=$(get /rehit/admin_user)
+          ADMIN_PASS=$(get /rehit/admin_pass)
+          export ADMIN_USER ADMIN_PASS
 
           docker compose up -d --build
 
