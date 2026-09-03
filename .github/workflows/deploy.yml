@@ -18,8 +18,8 @@ concurrency:
   cancel-in-progress: false   # never interrupt a half-finished docker build
 
 env:
-  AWS_REGION: ap-south-1
-  INSTANCE_ID: i-071d2336550985631
+  AWS_REGION: ap-southeast-1
+  INSTANCE_ID: i-07209e700d5f38996
   ROLE_ARN: arn:aws:iam::119492371915:role/rehit-github-deploy
 
 jobs:
