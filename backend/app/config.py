@@ -2,6 +2,15 @@
 import os
 
 
+def _required(name):
+    """No default on purpose - a shipped default password is a published one.
+    The deploy injects this from SSM Parameter Store; see .env.example."""
+    value = os.getenv(name)
+    if not value:
+        raise RuntimeError(f"{name} is not set")
+    return value
+
+
 def _int(name, default):
     try:
         return int(os.getenv(name, default))
@@ -11,7 +20,7 @@ def _int(name, default):
 
 class Settings:
     admin_user = os.getenv("ADMIN_USER", "Admin")
-    admin_pass = os.getenv("ADMIN_PASS", "AUACAD@2026")
+    admin_pass = _required("ADMIN_PASS")
 
     # question is shown alone for this long before the options appear; the answer
     # clock (and therefore scoring) only starts once they do
