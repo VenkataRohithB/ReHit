@@ -350,4 +350,12 @@ if (DIST / "index.html").exists():
 
     @app.get("/{full_path:path}")
     def spa(full_path: str):
+        # Real files in dist/ (favicon.svg, robots.txt, …) have to win over the
+        # SPA fallback: without this the browser gets index.html under a
+        # text/html type and the icon silently never loads. resolve() + the
+        # containment check keep "../" out of the served tree.
+        if full_path:
+            asset = (DIST / full_path).resolve()
+            if asset.is_file() and asset.is_relative_to(DIST.resolve()):
+                return FileResponse(asset)
         return FileResponse(DIST / "index.html")

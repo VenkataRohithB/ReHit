@@ -147,6 +147,80 @@ const RANK_PILL = ['bg-butter-ink text-butter', 'bg-peri-ink text-peri', 'bg-pea
 /* racing-bar fill: podium keeps its hue, everyone else gets one neutral tint */
 const RANK_FILL = ['bg-butter-ink/20', 'bg-peri-ink/20', 'bg-peach-ink/20']
 
+
+/** Loading indicator: the dart-throw, in 3D. Same geometry as the logo mark,
+    so it settles into the brand rather than into a spinner. `size` is px. */
+export function DartLoader({ size = 132, label = 'Loading', className = '' }) {
+  return (
+    <div role="status" aria-label={label} className={`dl ${className}`}
+      style={{ '--dl': `${size}px` }}>
+      <div className="dl-scene">
+        <svg viewBox="0 0 120 120" className="dl-layer" aria-hidden="true">
+          <circle cx="60" cy="60" r="42" fill="none" stroke="var(--color-line)" strokeWidth="9" />
+          <circle cx="60" cy="60" r="24" fill="none" stroke="var(--color-peri)" strokeWidth="9" />
+        </svg>
+        <span className="dl-ripple" />
+        <svg viewBox="0 0 120 120" className="dl-layer dl-dart" aria-hidden="true">
+          <path d="M 60 60 L 97 23" fill="none" stroke="var(--color-ink)"
+            strokeWidth="7" strokeLinecap="round" />
+          <polygon points="105.4,14.6 103.2,25.2 92.6,27.4 94.8,16.8" fill="var(--color-lilac)"
+            stroke="var(--color-lilac-ink)" strokeWidth="3" strokeLinejoin="round" />
+        </svg>
+        <svg viewBox="0 0 120 120" className="dl-layer" aria-hidden="true">
+          <circle cx="60" cy="60" r="9" fill="var(--color-anchor)" />
+        </svg>
+      </div>
+    </div>
+  )
+}
+
+/** The ReHit lockup — dart-in-target mark, then "Re" in anchor and "Hit" in
+    ink with the dot of the i swapped for an anchor hit-point. The mark here is
+    the display version: thin pastel rings, which read at header size but would
+    vanish at 16px — favicon.svg is the heavier small-size sibling. Built as dotless ı plus a positioned dot; the em
+    offsets are exact glyph metrics from the 800 weight (tittle centre x .13em,
+    dot centre y .685em, ø .2em), so it stays true at every font size. */
+export function Logo({ className = '' }) {
+  return (
+    <span aria-label="ReHit"
+      className={`logo-lk inline-flex items-baseline font-extrabold tracking-[-0.015em] ${className}`}>
+      <svg viewBox="0 0 120 120" aria-hidden="true"
+        className="lg-mark mr-[0.3em] h-[1.1em] w-[1.1em] self-center overflow-visible">
+        <circle cx="60" cy="60" r="42" fill="none" stroke="var(--color-line)" strokeWidth="9" />
+        <circle cx="60" cy="60" r="24" fill="none" stroke="var(--color-peri)" strokeWidth="9" />
+        <g className="lg-dart">
+          <path d="M 60 60 L 97 23" fill="none" stroke="var(--color-ink)"
+            strokeWidth="7" strokeLinecap="round" />
+          <polygon points="105.4,14.6 103.2,25.2 92.6,27.4 94.8,16.8" fill="var(--color-lilac)"
+            stroke="var(--color-lilac-ink)" strokeWidth="3" strokeLinejoin="round" />
+        </g>
+        <circle cx="60" cy="60" r="9" fill="var(--color-anchor)" />
+      </svg>
+      <span aria-hidden="true" className="lg-re text-anchor">Re</span>
+      <span aria-hidden="true" className="lg-hit tracking-normal">
+        H<span className="lg-dot mr-[-0.23em] inline-block h-[0.2em] w-[0.2em]
+          [transform:translateY(-0.585em)] rounded-full bg-anchor align-baseline" />ıt
+      </span>
+    </span>
+  )
+}
+
+/** The tagline as quiet chips — Recall / Hit / Repeat with option-tile chips
+    for separators (Q3 from the wordmark exploration). Login page only. */
+export function QuizTagline({ className = '' }) {
+  const word = 'text-[0.7rem] font-semibold uppercase tracking-[.28em] text-muted'
+  const chip = 'h-[6px] w-[6px] rounded-[2px]'
+  return (
+    <div className={`lg-tag flex items-center gap-3 ${className}`}>
+      <span className={word}>Recall</span>
+      <span className={`${chip} bg-mint`} />
+      <span className={word}>Hit</span>
+      <span className={`${chip} bg-lilac`} />
+      <span className={word}>Repeat</span>
+    </div>
+  )
+}
+
 export function Screen({ children, className = '' }) {
   return (
     <div className={`flex h-full flex-col gap-[clamp(.9rem,2vw,1.8rem)]
@@ -159,6 +233,11 @@ export function JoinStrip({ code, right, host = location.host }) {
     <div className="flex flex-none items-center gap-3 rounded-2xl border border-line
       px-[clamp(.8rem,1.6vw,1.4rem)] py-[clamp(.5rem,1vw,.9rem)]
       text-[clamp(.75rem,1.35vw,1.05rem)] font-medium text-muted">
+      {/* the strip is the only chrome on a projected screen, so the mark rides
+          here rather than on each phase — present all game, never competing
+          with the question */}
+      <Logo className="text-[1.35em]" />
+      <span aria-hidden="true" className="text-line">|</span>
       <span>Join at</span>
       <span className="font-extrabold text-ink">{host}</span>
       <span aria-hidden="true">·</span>

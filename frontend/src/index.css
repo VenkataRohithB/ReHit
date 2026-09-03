@@ -38,6 +38,73 @@ body {
 }
 
 @keyframes slidein { from { transform: translateX(-10px); opacity: 0 } }
+
+/* ============================ dart loader ============================
+   The logo assembling itself: a dart thrown *away* from the viewer into the
+   board. Real 3D — a perspective container plus translateZ — so no library.
+   It only ever runs while something is in flight, and it comes to rest as the
+   exact logo mark, which is also what reduced-motion viewers see. */
+.dl { width: var(--dl, 132px); height: var(--dl, 132px); perspective: 620px; flex: none; }
+.dl-scene { position: relative; height: 100%; width: 100%; transform-style: preserve-3d; }
+.dl-layer { position: absolute; inset: 0; height: 100%; width: 100%; overflow: visible; }
+.dl-ripple {
+  position: absolute; left: 50%; top: 50%;   /* the bullseye */
+  height: 50%; width: 50%; border-radius: 50%;
+  border: 2px solid var(--color-anchor);
+  transform: translate(-50%, -50%) scale(.42); opacity: 0;
+}
+
+@keyframes dl-throw {
+  0%   { transform: translate3d(58%, -58%, 300px) rotate(-12deg); opacity: 0 }
+  10%  { opacity: 1 }
+  40%  { transform: translate3d(0, 0, 0) rotate(0deg); opacity: 1 }
+  82%  { transform: translate3d(0, 0, 0) rotate(0deg); opacity: 1 }
+  94%  { transform: translate3d(0, 0, -60px) rotate(0deg); opacity: 0 }
+  100% { transform: translate3d(58%, -58%, 300px) rotate(-12deg); opacity: 0 }
+}
+/* the board takes the impact — a settle, not a bounce */
+@keyframes dl-hit    { 0%, 38% { scale: 1 } 46% { scale: .945 } 62%, 100% { scale: 1 } }
+@keyframes dl-ripple { 0%, 38% { transform: translate(-50%,-50%) scale(.42); opacity: 0 }
+                       48% { opacity: .55 }
+                       78%, 100% { transform: translate(-50%,-50%) scale(1.5); opacity: 0 } }
+/* a slow parallax tilt is what sells the depth while the dart is mid-air */
+@keyframes dl-tilt   { 0%, 100% { transform: rotateY(-11deg) rotateX(6deg) }
+                       50% { transform: rotateY(11deg) rotateX(-3deg) } }
+
+@media (prefers-reduced-motion: no-preference) {
+  .dl-scene  { animation: dl-tilt 5.2s ease-in-out infinite, dl-hit 1.9s var(--ease-calm) infinite }
+  .dl-dart   { animation: dl-throw 1.9s var(--ease-calm) infinite }
+  .dl-ripple { animation: dl-ripple 1.9s var(--ease-calm) infinite }
+}
+
+/* Login lockup entrance: the word rises, the hit point drops in, the tagline
+   follows. Scoped to .logo-enter so the dashboard header stays still. The dot's
+   resting offset lives in `transform`, so animating/hovering the independent
+   `translate` property never clobbers it. */
+@keyframes dartfly {
+  0%   { translate: 40px -40px; opacity: 0 }
+  100% { translate: 0 0; opacity: 1 }
+}
+@keyframes dotland {
+  0%   { translate: 0 -.5em; opacity: 0 }
+  70%  { translate: 0 .05em; opacity: 1 }
+  100% { translate: 0 0; opacity: 1 }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .logo-enter .lg-mark { animation: floatin .5s var(--ease-calm) both }
+  .logo-enter .lg-dart { animation: dartfly .5s var(--ease-calm) .34s both }
+  .logo-enter .lg-re  { animation: floatin .5s var(--ease-calm) both }
+  .logo-enter .lg-hit { animation: floatin .5s var(--ease-calm) .08s both }
+  .logo-enter .lg-dot { animation: dotland .55s var(--ease-calm) .34s both }
+  .logo-enter .lg-tag > * { animation: floatin .45s var(--ease-calm) both }
+  .logo-enter .lg-tag > *:nth-child(1) { animation-delay: .46s }
+  .logo-enter .lg-tag > *:nth-child(2) { animation-delay: .52s }
+  .logo-enter .lg-tag > *:nth-child(3) { animation-delay: .58s }
+  .logo-enter .lg-tag > *:nth-child(4) { animation-delay: .64s }
+  .logo-enter .lg-tag > *:nth-child(5) { animation-delay: .70s }
+  .lg-dot { transition: translate .35s var(--ease-calm) }
+  .logo-lk:hover .lg-dot { translate: 0 -.09em }
+}
 @keyframes rise    { from { transform: scaleY(.15); opacity: .4 } }
 /* a joiner should feel like it lands in the room, not just fade in */
 @keyframes bubble {

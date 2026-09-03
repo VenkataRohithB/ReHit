@@ -9,6 +9,7 @@ import { useSocket } from '../lib/useSocket.js'
 import {
   Screen, JoinStrip, Button, TimerRing, OptionKey, ResultBars, RaceBoard,
   WinnerFinale, LobbyPills, QuestionMedia, PollColumns, tone, useStopwatch, clock,
+  Logo, QuizTagline, DartLoader,
 } from '../ui.jsx'
 
 const TOKEN_KEY = 'quiz.token'
@@ -104,22 +105,29 @@ function Login({ onToken }) {
   const [u, setU] = useState('Admin')
   const [p, setP] = useState('')
   const [err, setErr] = useState('')
+  const [busy, setBusy] = useState(false)
   const submit = async (e) => {
     e.preventDefault()
+    setBusy(true)
+    setErr('')
     try {
       const { token, read_secs } = await login(u, p)
       localStorage.setItem(READ_KEY, String(read_secs ?? 0))
       onToken(token)
-    } catch { setErr('Those credentials did not work') }
+    } catch {
+      setErr('Those credentials did not work')
+      setBusy(false)   // left true on success — this screen is about to be replaced
+    }
   }
   const field = `w-full rounded-2xl border-2 border-line bg-canvas px-4 py-3.5
     outline-none transition placeholder:text-muted/50 focus:border-anchor`
   return (
     <Screen>
       <form onSubmit={submit} className="m-auto flex w-full max-w-sm flex-col gap-4">
-        <div className="mb-2">
-          <h1 className="text-[clamp(2rem,6vw,2.75rem)] font-extrabold tracking-tight">Quiz Live</h1>
-          <p className="mt-1 font-semibold text-muted">Sign in to build and host a quiz.</p>
+        <div className="logo-enter mb-2">
+          <h1 className="text-[clamp(2rem,6vw,2.75rem)]"><Logo /></h1>
+          <QuizTagline className="mt-3" />
+          <p className="mt-4 font-semibold text-muted">Sign in to build and host a quiz.</p>
         </div>
         <label className="flex flex-col gap-1.5">
           <span className="text-xs font-semibold uppercase tracking-[.1em] text-muted">Username</span>
@@ -131,7 +139,9 @@ function Login({ onToken }) {
           <input type="password" value={p} onChange={(e) => setP(e.target.value)}
             placeholder="••••••••" aria-label="Password" className={field} />
         </label>
-        <Button type="submit" className="mt-1 py-4 text-lg">Log in</Button>
+        {busy
+          ? <div className="mt-1 flex justify-center py-1"><DartLoader size={64} label="Signing in" /></div>
+          : <Button type="submit" className="mt-1 py-4 text-lg">Log in</Button>}
         {err && (
           <p role="alert" className="rounded-xl bg-rose px-4 py-3 font-semibold text-rose-ink">
             {err}
@@ -228,7 +238,7 @@ function Dashboard({ token, onNew, onEdit: openInBuilder, onOpen, onAuthFail }) 
   return (
     <div className="mx-auto max-w-4xl p-6">
       <div className="mb-8 flex flex-wrap items-center justify-between gap-3">
-        <h1 className="text-3xl font-extrabold tracking-tight">Quiz Live</h1>
+        <h1 className="text-3xl"><Logo /></h1>
         <div className="flex items-center gap-3">
           <Button onClick={onNew}>New quiz</Button>
           <button onClick={onAuthFail}
@@ -266,7 +276,12 @@ function Dashboard({ token, onNew, onEdit: openInBuilder, onOpen, onAuthFail }) 
         Recent quizzes
       </h2>
 
-      {!data && <p className="text-muted">Loading…</p>}
+      {!data && (
+        <div className="flex flex-col items-center gap-4 py-16">
+          <DartLoader label="Loading your quizzes" />
+          <p className="font-semibold text-muted">Loading your quizzes…</p>
+        </div>
+      )}
       {data && !data.rows.length && (
         <div className="rounded-2xl border border-dashed border-line px-8 py-12 text-center">
           <p className="text-lg font-extrabold">No quizzes yet</p>
