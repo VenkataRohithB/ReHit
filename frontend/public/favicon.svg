@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120">
+  <!-- The ReHit logo mark, verbatim: same geometry, same layer order, same
+       palette as <Logo> in src/ui.jsx. A standalone SVG cannot read the app's
+       CSS custom properties, so the tokens are resolved to their hex values
+       from src/index.css — keep the two in step if a token ever moves. -->
+  <circle cx="60" cy="60" r="42" fill="none" stroke="#E6E9F0" stroke-width="9"/>
+  <circle cx="60" cy="60" r="24" fill="none" stroke="#DDE4FF" stroke-width="9"/>
+  <path d="M 60 60 L 97 23" fill="none" stroke="#1B2333" stroke-width="7" stroke-linecap="round"/>
+  <polygon points="105.4,14.6 103.2,25.2 92.6,27.4 94.8,16.8"
+           fill="#EBE2FF" stroke="#5B34B0" stroke-width="3" stroke-linejoin="round"/>
+  <circle cx="60" cy="60" r="9" fill="#4C6BE8"/>
+</svg>

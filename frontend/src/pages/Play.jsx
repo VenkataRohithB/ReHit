@@ -4,7 +4,7 @@ import { wsUrl, roomInfo } from '../lib/api.js'
 import { useSocket } from '../lib/useSocket.js'
 import {
   Screen, Button, TimerBar, OptionKey, Leaderboard, QuestionMedia, Ticker, faceOf, clock,
-  tone, useCountdown, useStopwatch,
+  tone, useCountdown, useStopwatch, Logo, QuizTagline,
 } from '../ui.jsx'
 
 /* Stable per-device id, shared across every room. It identifies a seat to the
@@ -120,7 +120,11 @@ export default function Play() {
           <span>{code}</span>
         </div>
         <form onSubmit={doJoin} className="flex flex-1 flex-col justify-center gap-4 text-center">
-          <h1 className="text-[clamp(1.6rem,8vw,2.4rem)] font-extrabold tracking-tight">Join the quiz</h1>
+          <div className="logo-enter flex flex-col items-center gap-3">
+          <h1 className="text-[clamp(1.7rem,8vw,2.4rem)]"><Logo /></h1>
+          <QuizTagline />
+        </div>
+        <p className="font-semibold text-muted">Join the quiz</p>
           {/* one field, or none — an anonymous room asks for nothing at all */}
           {identity === 'email' && (
             <input autoFocus type="email" value={typed} onChange={(e) => setTyped(e.target.value)}
@@ -161,6 +165,7 @@ export default function Play() {
 
       {view.screen === 'lobby' && (
         <div className="flex flex-1 flex-col items-center justify-center gap-3 text-center">
+          <Logo className="mb-3 text-xl" />
           <div className="text-[clamp(3rem,18vw,6rem)] font-extrabold tabular-nums text-anchor">
             {lobby.count}
           </div>
