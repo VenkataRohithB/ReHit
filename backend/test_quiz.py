@@ -5,6 +5,7 @@ import tempfile
 import time
 
 os.environ.setdefault("DB_PATH", os.path.join(tempfile.gettempdir(), "quiz-test.db"))
+os.environ.setdefault("ADMIN_PASS", "test-only")
 
 from app.game import (  # noqa: E402
     Room, Player, score_answer, rank_players, build_csv, split_timer,

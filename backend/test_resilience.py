@@ -18,7 +18,9 @@ import websockets
 BASE = os.getenv("BASE", "http://localhost:8000")
 WS = BASE.replace("http", "ws")
 USER = os.getenv("ADMIN_USER", "Admin")
-PASS = os.getenv("ADMIN_PASS", "AUACAD@2026")
+PASS = os.getenv("ADMIN_PASS")
+if not PASS:
+    raise SystemExit("set ADMIN_PASS to the deployed admin password before running")
 
 READ, ANSWER = 5, 7          # the room splits a 12s timer into 5s read + 7s answer
 
