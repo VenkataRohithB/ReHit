@@ -78,13 +78,28 @@ export async function deleteQuiz(token, id) {
   if (!r.ok) throw new Error('Could not delete that quiz')
 }
 
-export async function downloadCsv(token, code) {
-  const r = await authed(token, `/api/room/${code}/csv`)
-  if (!r.ok) throw new Error('No results available for that room')
+/* The four things a finished game can be downloaded as. `scores` is the
+   gradebook — one row per student. The rest carry the question text, the answer
+   key and the aggregates, which the gradebook has never had room for. */
+export const EXPORTS = {
+  scores: { path: 'csv', file: 'scores.csv', label: 'Scores (CSV)' },
+  responses: { path: 'responses.csv', file: 'responses.csv', label: 'Responses (CSV)' },
+  questions: { path: 'questions.csv', file: 'questions.csv', label: 'Question analysis (CSV)' },
+  report: { path: 'report.json', file: 'report.json', label: 'Full report (JSON)' },
+}
+
+export async function downloadCsv(token, code, kind = 'scores') {
+  const spec = EXPORTS[kind] || EXPORTS.scores
+  const r = await authed(token, `/api/room/${code}/${spec.path}`)
+  if (!r.ok) {
+    // a game archived before reports existed still has its gradebook
+    const body = await r.json().catch(() => null)
+    throw new Error(body?.detail || 'No results available for that room')
+  }
   const url = URL.createObjectURL(await r.blob())
   const a = document.createElement('a')
   a.href = url
-  a.download = `${code}_results.csv`
+  a.download = `${code}_${spec.file}`
   a.click()
   URL.revokeObjectURL(url)
 }

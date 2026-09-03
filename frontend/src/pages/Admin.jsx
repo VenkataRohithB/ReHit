@@ -1,15 +1,16 @@
 import { useCallback, useEffect, useState } from 'react'
 import QRCode from 'qrcode'
 import {
-  login, createQuiz, downloadCsv, activity, savedQuiz, runSavedQuiz, deleteQuiz,
+  login, createQuiz, downloadCsv, EXPORTS, activity, savedQuiz, runSavedQuiz,
+  deleteQuiz,
   wsUrl, AuthError,
 } from '../lib/api.js'
 import { parseQuiz, formatQuiz, EXAMPLE } from '../lib/parseQuiz.js'
+import { mergeQuestion, isTimed } from '../lib/question.js'
 import { useSocket } from '../lib/useSocket.js'
 import {
   Screen, JoinStrip, Button, TimerRing, OptionKey, ResultBars, RaceBoard,
-  WinnerFinale, LobbyPills, QuestionMedia, PollColumns, tone, useStopwatch, clock,
-  Logo, QuizTagline, DartLoader,
+  WinnerFinale, LobbyPills, QuestionMedia, PollColumns, tone, useStopwatch, clock, Logo, QuizTagline, DartLoader,
 } from '../ui.jsx'
 
 const TOKEN_KEY = 'quiz.token'
@@ -167,7 +168,10 @@ function RowMenu({ row, open, onToggle, onRerun, onEdit, onCsv, onDelete }) {
     row.quiz_id != null && { label: 'Re-run this quiz', fn: onRerun },
     row.quiz_id != null && { label: 'Edit questions', fn: onEdit },
     // always listed, disabled with a reason when that quiz has never finished
-    { label: 'Download CSV', fn: onCsv, off: !row.code, hint: row.code ? null : 'no results' },
+    ...Object.entries(EXPORTS).map(([kind, e]) => ({
+      label: e.label, fn: () => onCsv(kind), off: !row.code,
+      hint: row.code ? null : 'no results',
+    })),
     row.quiz_id != null && { label: 'Delete quiz', fn: onDelete, danger: true },
   ].filter(Boolean)
   if (!items.length) return null
@@ -215,8 +219,8 @@ function Dashboard({ token, onNew, onEdit: openInBuilder, onOpen, onAuthFail }) 
 
   useEffect(() => { activity(token).then(setData).catch(fail) }, [token, fail])
 
-  const grab = async (code) => {
-    try { await downloadCsv(token, code) } catch (e) { fail(e) }
+  const grab = async (code, kind) => {
+    try { await downloadCsv(token, code, kind) } catch (e) { fail(e) }
   }
 
   const rerun = async (row) => {
@@ -334,7 +338,7 @@ function Dashboard({ token, onNew, onEdit: openInBuilder, onOpen, onAuthFail }) 
                 <RowMenu row={row} open={menu === id}
                   onRerun={() => rerun(row)}
                   onToggle={() => setMenu((m) => (m === id ? null : id))}
-                  onEdit={() => edit(row)} onCsv={() => grab(row.code)}
+                  onEdit={() => edit(row)} onCsv={(kind) => grab(row.code, kind)}
                   onDelete={() => remove(row)} />
               </span>
             </div>
@@ -705,8 +709,14 @@ function Host({ token, code, onExit, onAuthFail }) {
       // there until the host starts the next question
       case 'lobby': setLobby(m); if (m.state === 'waiting') setPhase('waiting'); break
       case 'question':
-        // the reading-phase payload has no options; merge so the later reveal fills them in
-        setQuestion((q) => (q && q.index === m.index ? { ...q, ...m } : m))
+        // The reading-phase payload has no options, so this merges to let the
+        // later answering payload fill them in. But timing keys are OMITTED
+        // rather than nulled when they do not apply — an open question sends
+        // `elapsed` and no `remaining` — and a spread cannot unset a key the
+        // new payload leaves out. The reading phase's `remaining` therefore
+        // survived into the answering phase and drew a countdown on a question
+        // the host is supposed to close by hand. Clear them before merging.
+        setQuestion((q) => mergeQuestion(q, m))
         // seed from the payload: the console used to sit on "0 of 0 answered"
         // until the first tap, which is exactly when you most want the number
         if (m.phase !== 'reading') setProgress({ answered: m.answered ?? 0, total: m.players ?? 0 })
@@ -731,8 +741,8 @@ function Host({ token, code, onExit, onAuthFail }) {
   const players = phase === 'lobby' || waiting
     ? `${lobby.count} / ${lobby.capacity} joined` : `${lobby.count} players`
 
-  const grab = async () => {
-    try { await downloadCsv(token, code) } catch (e) { if (e instanceof AuthError) onAuthFail() }
+  const grab = async (kind) => {
+    try { await downloadCsv(token, code, kind) } catch (e) { if (e instanceof AuthError) onAuthFail() }
   }
   // the room holds on the insights screen until this is sent
   const [advancing, setAdvancing] = useState(false)
@@ -870,7 +880,7 @@ function Host({ token, code, onExit, onAuthFail }) {
                 <Answered {...progress} />
                 {/* on a clock, the ring counts down and closes it. Open, the clock
                     counts up and the only thing that closes it is this button. */}
-                {question.remaining != null ? (
+                {isTimed(question) ? (
                   <TimerRing remaining={question.remaining} total={question.window}
                     qkey={question.index} className="w-[clamp(4rem,9vw,7.5rem)]" />
                 ) : (
@@ -935,24 +945,13 @@ function Host({ token, code, onExit, onAuthFail }) {
           </div>
           <RaceBoard rows={results.leaderboard} />
           <div className="flex flex-none items-center justify-between gap-4">
-            {/* the last screen before the next question, so it is where a
-                latecomer gets a chance to scan in — players may join any time */}
-            {/* the only moment a latecomer gets to scan, so it has to be
-                readable from a seat — the old 44px thumbnail was decorative */}
-            <div className="flex items-center gap-4">
-              {qr && <img src={qr} alt={`QR code to join room ${code}`}
-                className="w-[clamp(7rem,14vw,11rem)] flex-none rounded-xl" />}
-              <span className="font-semibold text-muted">
-                <span className="block text-[clamp(1.4rem,3vw,2.4rem)] font-extrabold
-                  tracking-[.12em] text-anchor">{code}</span>
-                <span className="block text-[clamp(.85rem,1.5vw,1.15rem)]">
-                  Scan to join — you can come in at any point
-                </span>
-                <span className="block text-[.85em] font-medium">
-                  Top {results.leaderboard.length} of {results.total_players} players
-                </span>
-              </span>
-            </div>
+            {/* No QR here. The waiting screen before the next question is a
+                full join screen already, so a second invitation on top of the
+                standings just competes with them — and this is the one screen
+                the room is meant to be reading, not scanning. */}
+            <span className="font-semibold text-muted">
+              Top {results.leaderboard.length} of {results.total_players} players
+            </span>
             <div className="flex flex-none items-center gap-2">
               <button onClick={() => setPhase('bars')}
                 className="rounded-xl px-4 py-3 font-semibold text-muted hover:text-ink">
@@ -992,7 +991,16 @@ function Host({ token, code, onExit, onAuthFail }) {
                 <b className="font-extrabold tabular-nums">{p.score}</b>
               </span>
             ))}
-            <Button onClick={grab}>Download CSV</Button>
+            <Button onClick={() => grab('report')}>Download report</Button>
+            {/* the report is the one worth pressing, so it is the filled button;
+                the narrower cuts sit beside it for whoever wants just one */}
+            {['scores', 'responses', 'questions'].map((k) => (
+              <button key={k} onClick={() => grab(k)}
+                className="rounded-xl bg-track px-4 py-3 text-[clamp(.7rem,1.2vw,.95rem)]
+                  font-semibold hover:brightness-95">
+                {EXPORTS[k].label}
+              </button>
+            ))}
             <button onClick={onExit}
               className="rounded-xl px-4 py-3 font-semibold text-muted hover:text-ink">Done</button>
           </div>

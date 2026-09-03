@@ -21,8 +21,9 @@ CREATE TABLE IF NOT EXISTS rooms (
   questions INTEGER NOT NULL,
   players   INTEGER NOT NULL,
   top       TEXT NOT NULL,   -- json [{name, score}] top 3
-  csv       TEXT NOT NULL,   -- full export, rendered once at game end
-  title     TEXT NOT NULL DEFAULT ''
+  csv       TEXT NOT NULL,   -- gradebook export, rendered once at game end
+  title     TEXT NOT NULL DEFAULT '',
+  report    TEXT NOT NULL DEFAULT ''   -- json, the full record; see app/report.py
 );
 CREATE INDEX IF NOT EXISTS rooms_ended ON rooms(ended DESC);
 
@@ -60,6 +61,10 @@ def init():
         cols = {r["name"] for r in c.execute("PRAGMA table_info(rooms)")}
         if "title" not in cols:
             c.execute("ALTER TABLE rooms ADD COLUMN title TEXT NOT NULL DEFAULT ''")
+        # games archived before the full report existed keep their gradebook CSV;
+        # report_for() returns None for them rather than inventing one
+        if "report" not in cols:
+            c.execute("ALTER TABLE rooms ADD COLUMN report TEXT NOT NULL DEFAULT ''")
         # quizzes saved before the per-quiz switches existed; '{}' is the migration,
         # since clean_mode turns an empty dict back into the original behaviour
         qcols = {r["name"] for r in c.execute("PRAGMA table_info(quizzes)")}
@@ -125,14 +130,21 @@ def delete_quiz(qid):
 
 
 # ---------- finished games ----------
-def save(room, csv_text, top):
-    """Record a finished room. Re-running a code overwrites, so retries are safe."""
+def save(room, csv_text, top, report=None):
+    """Record a finished room. Re-running a code overwrites, so retries are safe.
+
+    The report is stored as rendered JSON rather than rebuilt on demand: the
+    room it describes is gone from memory minutes later, so there is nothing
+    left to rebuild it from.
+    """
     with _conn() as c:
         c.execute(
-            "INSERT OR REPLACE INTO rooms VALUES (?,?,?,?,?,?,?,?)",
+            "INSERT OR REPLACE INTO rooms "
+            "(code, created, ended, questions, players, top, csv, title, report) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
             (room.code, room.created, room.ended_at or time.time(),
              len(room.questions), len(room.players), json.dumps(top), csv_text,
-             getattr(room, "title", "")),
+             getattr(room, "title", ""), json.dumps(report) if report else ""),
         )
         _roll(c, "rooms", "ended", settings.history_limit)
 
@@ -178,6 +190,15 @@ def activity():
     rows += [row(None, r) for r in list(latest.values()) + untitled]
     rows.sort(key=lambda x: x["last_run"], reverse=True)
     return rows
+
+
+def report_for(code):
+    """The stored report, or None for a game archived before they existed."""
+    with _conn() as c:
+        row = c.execute("SELECT report FROM rooms WHERE code = ?", (code,)).fetchone()
+    if not row or not row["report"]:
+        return None
+    return json.loads(row["report"])
 
 
 def csv_for(code):

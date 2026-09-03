@@ -4,6 +4,7 @@ import base64
 import contextlib
 import hashlib
 import hmac
+import json
 import logging
 import os
 import time
@@ -21,16 +22,19 @@ from . import store
 from .config import settings
 from .game import RoomManager, build_csv, rank_players
 from .models import LoginReq, QuizIn
+from .report import (
+    build_report, responses_csv, questions_csv,
+)
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("quiz")
 
 
 def archive(room):
-    """Persist a finished room so history and CSV outlive the process."""
+    """Persist a finished room so history, CSV and the full report outlive it."""
     top = [{"name": p.name, "score": p.score}
            for p in rank_players(room.players.values())[:3]]
-    store.save(room, build_csv(room), top)
+    store.save(room, build_csv(room), top, build_report(room))
     log.info("room %s archived (%d players)", room.code, len(room.players))
 
 
@@ -187,6 +191,51 @@ def remove_quiz(qid: int, _: str = Depends(require_admin)):
     if not store.delete_quiz(qid):
         raise HTTPException(404, "No saved quiz with that id")
     return {"deleted": qid}
+
+
+def _report(code):
+    """A live room is rebuilt from memory; a finished one comes from sqlite.
+    Games archived before reports existed have none, and say so plainly rather
+    than returning a hollow one."""
+    room = manager.get(code)
+    if room:
+        return build_report(room)
+    stored = store.report_for(code)
+    if stored is None:
+        raise HTTPException(
+            404, "No report for that room — it finished before reports were added")
+    return stored
+
+
+def _attach(text, code, kind, ext, title):
+    return Response(text, media_type=f"text/{ext}" if ext == "csv" else "application/json",
+                    headers={"Content-Disposition":
+                             f'attachment; filename="{code}_{store.slug(title)}_{kind}.{ext}"'})
+
+
+@app.get("/api/room/{code}/report.json")
+def export_report(code: str, _: str = Depends(require_admin)):
+    """Everything about the game in one document: what was asked, how the room
+    answered, how each question performed and how each person did. Built to be
+    read by a person or handed straight to a model."""
+    rep = _report(code)
+    return _attach(json.dumps(rep, indent=2, ensure_ascii=False), code,
+                   "report", "json", rep["quiz"]["title"])
+
+
+@app.get("/api/room/{code}/responses.csv")
+def export_responses(code: str, _: str = Depends(require_admin)):
+    """One row per answer, each carrying its question and answer text — the
+    shape a pivot table or a spreadsheet wants."""
+    rep = _report(code)
+    return _attach(responses_csv(rep), code, "responses", "csv", rep["quiz"]["title"])
+
+
+@app.get("/api/room/{code}/questions.csv")
+def export_questions(code: str, _: str = Depends(require_admin)):
+    """One row per question: how the room did on it."""
+    rep = _report(code)
+    return _attach(questions_csv(rep), code, "questions", "csv", rep["quiz"]["title"])
 
 
 @app.get("/api/room/{code}/csv")

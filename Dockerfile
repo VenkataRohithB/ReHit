@@ -13,8 +13,11 @@ ENV PYTHONUNBUFFERED=1
 COPY backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY backend/app ./app
-# ships with the image so the pre-flight check can be run against a live room
-COPY backend/test_resilience.py .
+# ship with the image so the pre-flight checks can be run against a live room:
+#   docker compose exec app python /srv/test_resilience.py   flaky-network failures
+#   docker compose exec app python /srv/test_features.py     every switch and screen
+#   docker compose exec app python /srv/test_load.py         a full class, PLAYERS=50
+COPY backend/test_resilience.py backend/test_features.py backend/test_load.py ./
 COPY --from=frontend /fe/dist ./app/static
 EXPOSE 8000
 # in-memory state -> single worker only (see app/game.py note)
