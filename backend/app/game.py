@@ -472,7 +472,13 @@ class Room:
     async def send_hosts(self, msg):
         for hw in list(self.hosts):
             if not await self._send(hw, msg):
+                # Hang up, don't just forget it. Discarding alone left the console
+                # connected and still answered its pings, so it never reconnected
+                # and never heard another message: Next went through but the
+                # screen sat there until a refresh. Closed, it reconnects in a
+                # second and ws_host puts it back on the current screen.
                 self.hosts.discard(hw)
+                asyncio.create_task(_hang_up(hw))
 
     # ---------- game loop ----------
     async def run(self):

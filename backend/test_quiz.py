@@ -956,6 +956,36 @@ def test_the_host_can_end_the_quiz_from_any_screen():
 
     asyncio.run(drive())
 
+
+def test_a_console_that_misses_a_send_is_hung_up_so_it_resyncs():
+    """A failed send to the host used to just drop it from room.hosts. Its socket
+    stayed open and kept answering pings, so the console never reconnected and
+    never heard another message: Next reached the server but the screen froze
+    until a refresh. It must be closed, so the client reconnects and resyncs."""
+    import asyncio
+
+    class StalledWs:
+        closed = False
+        async def send_json(self, msg):
+            raise ConnectionError("stalled past SEND_TIMEOUT")
+        async def close(self):
+            self.closed = True
+
+    class GoodWs(StalledWs):
+        async def send_json(self, msg):
+            self.got = msg
+
+    async def drive():
+        r = mkroom()
+        bad, good = StalledWs(), GoodWs()
+        r.hosts.update({bad, good})
+        await r.send_hosts({"type": "progress"})
+        await asyncio.sleep(0)               # let the hang-up task run
+        assert bad not in r.hosts and bad.closed, "a stalled console must be hung up"
+        assert good in r.hosts and not good.closed and good.got["type"] == "progress"
+
+    asyncio.run(drive())
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
