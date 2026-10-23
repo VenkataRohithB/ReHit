@@ -908,6 +908,54 @@ def test_a_formula_typed_as_a_name_cannot_run_in_a_spreadsheet():
     assert _safe("Merge sort") == "Merge sort"
 
 
+
+def test_the_host_can_end_the_quiz_from_any_screen():
+    """Quitting mid-question keeps what was revealed, drops the open question
+    unscored, tells the room, and archives only the questions actually asked."""
+    import asyncio
+    from app.game import RoomManager
+    from app.config import settings
+
+    async def drive():
+        archived = []
+        mgr = RoomManager(settings, on_end=archived.append)
+        r = mkroom(nq=3, timer=1)
+        r.read_secs = 0
+        mgr.rooms[r.code] = r
+        r.players["a"] = Player("a")
+        r.players["b"] = Player("b")             # never answers, so Q2 stays open
+        assert mgr.start(r)
+        await asyncio.sleep(0.05)
+        r.record_answer("a", 1)                 # Q1 right
+        await asyncio.sleep(1.2)                # b runs the clock out
+        assert r.state == "results"
+        r.request_next()
+        await asyncio.sleep(0.05)
+        r.request_begin()
+        await asyncio.sleep(0.05)
+        assert r.state == "question" and r.q_index == 1
+        r.record_answer("a", 1)                 # answered, but Q2 never closes
+
+        assert await mgr.quit(r) is True
+        assert r.state == "ended" and r.task.done()
+        assert r.final_msg["quit"] is True and r.final_msg["asked"] == 1
+        assert r.final_msg["leaderboard"][0]["score"] > 0
+        assert len(r.questions) == 1, "only the revealed question is reported"
+        assert len(r.players["a"].answers) == 1, "the open question went unscored"
+        assert archived == [r]
+        assert await mgr.quit(r) is False, "a second quit is a no-op"
+        assert r.add_or_reconnect("late@x.edu")[1], "an ended room refuses joiners"
+
+        # quitting from the lobby closes the room and leaves no history behind
+        idle = mkroom()
+        mgr.rooms["IDLE"] = idle
+        assert await mgr.quit(idle) is True
+        assert idle.state == "ended" and "leaderboard" not in idle.final_msg
+        assert archived == [r], "nothing was played, nothing archived"
+        assert not mgr.start(idle), "an ended room cannot be started"
+
+    asyncio.run(drive())
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

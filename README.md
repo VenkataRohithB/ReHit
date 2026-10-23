@@ -52,6 +52,10 @@ link the host console shows (with QR).
    **Download results CSV** (score + per-question answer / correct / time).
    Finished games are archived, so the CSV stays available from the dashboard
    afterwards.
+7. **End quiz**, in the strip along the top of the console, stops the game for
+   everyone from any screen. Questions already revealed keep their scores and
+   the game is archived with a report of just those; a question still open is
+   dropped unscored. Ended from the lobby, the room just closes.
 
 **Refreshing is safe.** Admin sessions are signed tokens rather than server-side
 state, held in `localStorage` — so a reload, a new tab, or a **server restart**
