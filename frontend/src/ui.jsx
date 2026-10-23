@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { Link } from 'react-router-dom'
 
 /* ============================ animation kit ============================
    Everything here is hand-rolled — no animation dependency. See DESIGN.md.
@@ -179,11 +180,14 @@ export function DartLoader({ size = 132, label = 'Loading', className = '' }) {
     the display version: thin pastel rings, which read at header size but would
     vanish at 16px — favicon.svg is the heavier small-size sibling. Built as dotless ı plus a positioned dot; the em
     offsets are exact glyph metrics from the 800 weight (tittle centre x .13em,
-    dot centre y .685em, ø .2em), so it stays true at every font size. */
-export function Logo({ className = '' }) {
-  return (
-    <span aria-label="ReHit"
-      className={`logo-lk inline-flex items-baseline font-extrabold tracking-[-0.015em] ${className}`}>
+    dot centre y .685em, ø .2em), so it stays true at every font size.
+    With `to` the lockup is a link — the admin's way home from any screen.
+    Without it, it is just the mark: a player's "home" is the room they are
+    in, and `/` would drop them on the admin login. */
+export function Logo({ className = '', to, onClick }) {
+  const cls = `logo-lk inline-flex items-baseline font-extrabold tracking-[-0.015em] ${className}`
+  const lockup = (
+    <>
       <svg viewBox="0 0 120 120" aria-hidden="true"
         className="lg-mark mr-[0.3em] h-[1.1em] w-[1.1em] self-center overflow-visible">
         <circle cx="60" cy="60" r="42" fill="none" stroke="var(--color-line)" strokeWidth="9" />
@@ -201,8 +205,10 @@ export function Logo({ className = '' }) {
         H<span className="lg-dot mr-[-0.23em] inline-block h-[0.2em] w-[0.2em]
           [transform:translateY(-0.585em)] rounded-full bg-anchor align-baseline" />ıt
       </span>
-    </span>
+    </>
   )
+  if (!to) return <span aria-label="ReHit" className={cls}>{lockup}</span>
+  return <Link to={to} onClick={onClick} aria-label="ReHit — home" className={cls}>{lockup}</Link>
 }
 
 /** The tagline as quiet chips — Recall / Hit / Repeat with option-tile chips
@@ -228,7 +234,7 @@ export function Screen({ children, className = '' }) {
   )
 }
 
-export function JoinStrip({ code, right, host = location.host }) {
+export function JoinStrip({ code, right, host = location.host, onHome }) {
   return (
     <div className="flex flex-none items-center gap-3 rounded-2xl border border-line
       px-[clamp(.8rem,1.6vw,1.4rem)] py-[clamp(.5rem,1vw,.9rem)]
@@ -236,7 +242,7 @@ export function JoinStrip({ code, right, host = location.host }) {
       {/* the strip is the only chrome on a projected screen, so the mark rides
           here rather than on each phase — present all game, never competing
           with the question */}
-      <Logo className="text-[1.35em]" />
+      <Logo className="text-[1.35em]" to="/" onClick={onHome} />
       <span aria-hidden="true" className="text-line">|</span>
       <span>Join at</span>
       <span className="font-extrabold text-ink">{host}</span>
