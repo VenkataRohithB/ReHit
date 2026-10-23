@@ -126,7 +126,7 @@ function Login({ onToken }) {
     <Screen>
       <form onSubmit={submit} className="m-auto flex w-full max-w-sm flex-col gap-4">
         <div className="logo-enter mb-2">
-          <h1 className="text-[clamp(2rem,6vw,2.75rem)]"><Logo /></h1>
+          <h1 className="text-[clamp(2rem,6vw,2.75rem)]"><Logo to="/" /></h1>
           <QuizTagline className="mt-3" />
           <p className="mt-4 font-semibold text-muted">Sign in to build and host a quiz.</p>
         </div>
@@ -242,7 +242,7 @@ function Dashboard({ token, onNew, onEdit: openInBuilder, onOpen, onAuthFail }) 
   return (
     <div className="mx-auto max-w-4xl p-6">
       <div className="mb-8 flex flex-wrap items-center justify-between gap-3">
-        <h1 className="text-3xl"><Logo /></h1>
+        <h1 className="text-3xl"><Logo to="/" /></h1>
         <div className="flex items-center gap-3">
           <Button onClick={onNew}>New quiz</Button>
           <button onClick={onAuthFail}
@@ -777,7 +777,9 @@ function Host({ token, code, onExit, onAuthFail }) {
 
   return (
     <Screen>
-      <JoinStrip code={code} right={players} host={publicHost} />
+      {/* the mark is the way home: back to the dashboard, where this room stays
+          listed under "Running now" with Resume — same as the lobby's Back */}
+      <JoinStrip code={code} right={players} host={publicHost} onHome={onExit} />
 
       {/* The same screen opens the quiz and gates every question after it: the
           room code and a QR big enough to scan from a seat, who is in, and one
