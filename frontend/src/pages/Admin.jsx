@@ -781,11 +781,25 @@ function Host({ token, code, onExit, onGone, onAuthFail }) {
   }
   useEffect(() => { setAdvancing(false) }, [results, over])
 
+  // Ends it for everyone, from any screen. Revealed questions stand and are
+  // archived with their report; a question still open is dropped unscored.
+  const quit = () => {
+    if (!confirm('End this quiz for everyone? Questions already shown keep their scores; '
+      + 'anything still open is dropped.')) return
+    send({ type: 'quit' })
+  }
+
   return (
     <Screen>
       {/* the mark links home: the dashboard, where this room stays listed under
           "Running now" with Resume — same as the lobby's Back */}
-      <JoinStrip code={code} right={players} host={publicHost} />
+      <JoinStrip code={code} right={players} host={publicHost} action={phase !== 'over' && (
+        <button onClick={quit} disabled={status !== 'open'}
+          className="rounded-lg px-2 py-1 font-semibold text-muted hover:bg-rose
+            hover:text-rose-ink disabled:opacity-40">
+          End quiz
+        </button>
+      )} />
 
       {/* The same screen opens the quiz and gates every question after it: the
           room code and a QR big enough to scan from a seat, who is in, and one
@@ -982,7 +996,7 @@ function Host({ token, code, onExit, onGone, onAuthFail }) {
             : (
               <div className="flex flex-1 flex-col items-center justify-center gap-2 text-center">
                 <div className="text-[clamp(1.6rem,4.6vw,4rem)] font-extrabold tracking-tight">
-                  That's the last question
+                  {over.quit ? 'Quiz ended' : "That's the last question"}
                 </div>
                 <p className="text-[clamp(1rem,2vw,1.6rem)] font-semibold text-muted">
                   {over.total_players} took part
@@ -999,6 +1013,8 @@ function Host({ token, code, onExit, onGone, onAuthFail }) {
                 <b className="font-extrabold tabular-nums">{p.score}</b>
               </span>
             ))}
+            {/* ended before a single question was revealed: nothing to download */}
+            {(!over.quit || over.asked > 0) && <>
             <Button onClick={() => grab('report')}>Download report</Button>
             {/* the report is the one worth pressing, so it is the filled button;
                 the narrower cuts sit beside it for whoever wants just one */}
@@ -1009,6 +1025,7 @@ function Host({ token, code, onExit, onGone, onAuthFail }) {
                 {EXPORTS[k].label}
               </button>
             ))}
+            </>}
             <button onClick={onExit}
               className="rounded-xl px-4 py-3 font-semibold text-muted hover:text-ink">Done</button>
           </div>

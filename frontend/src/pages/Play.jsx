@@ -281,7 +281,8 @@ export default function Play() {
           {view.leaderboard?.length > 0 &&
             <Leaderboard rows={view.leaderboard.slice(0, 5)} meName={myName} compact />}
           <p className="flex-none text-center font-semibold text-muted">
-            {view.leaderboard ? 'Well played' : 'Thanks for taking part'}
+            {view.quit ? 'The host ended the quiz' : view.leaderboard ? 'Well played'
+              : 'Thanks for taking part'}
           </p>
         </>
       )}

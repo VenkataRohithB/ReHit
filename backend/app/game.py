@@ -528,18 +528,26 @@ class Room:
                 await self._reveal(i, q)
                 await self._await_host()
 
-            self.state = "ended"
-            self.ended_at = time.time()
-            ranking = rank_players(self.players.values())
-            self.final_msg = {
-                "type": "game_over",
-                "total_players": len(self.players),
-            }
-            if self.mode["board"] != "never":     # `end` shows it only here
-                self.final_msg["leaderboard"] = self.board(ranking)
-            await self.broadcast(self.final_msg)
+            await self.finish()
         except asyncio.CancelledError:
-            pass
+            pass   # server shutdown, or the host ending it early (RoomManager.quit)
+
+    async def finish(self, quit=False):
+        """Close the room and send everyone the final screen. `quit` marks a quiz
+        the host ended early, with `asked` saying how many questions counted."""
+        self.state = "ended"
+        self.ended_at = time.time()
+        ranking = rank_players(self.players.values())
+        self.final_msg = {
+            "type": "game_over",
+            "total_players": len(self.players),
+        }
+        if quit:
+            self.final_msg.update(quit=True, asked=self.revealed)
+        # `end` shows it only here; nothing revealed means nothing to rank
+        if self.mode["board"] != "never" and self.revealed:
+            self.final_msg["leaderboard"] = self.board(ranking)
+        await self.broadcast(self.final_msg)
 
     async def _await_host(self):
         """Hold on the insights screen until the host asks for the next question.
@@ -711,11 +719,41 @@ class RoomManager:
 
     async def _run(self, room):
         await room.run()
-        if self.on_end and room.state == "ended":
-            try:
-                self.on_end(room)
-            except Exception:          # history is nice-to-have, never break the game
-                logging.getLogger("quiz").exception("failed to archive room %s", room.code)
+        if room.state == "ended":
+            self._archive(room)
+
+    def _archive(self, room):
+        if not self.on_end:
+            return
+        try:
+            self.on_end(room)
+        except Exception:          # history is nice-to-have, never break the game
+            logging.getLogger("quiz").exception("failed to archive room %s", room.code)
+
+    async def quit(self, room):
+        """The host ended the quiz early, from any screen. Every question already
+        revealed stands; one still in flight is dropped unscored, since half a
+        room's answers would score unfairly. Returns False if it had already ended."""
+        if room.state == "ended":
+            return False
+        task = room.task
+        # run() swallows the cancel and returns without finishing. Cancel until it
+        # lands: on Python < 3.12 wait_for() can eat a cancel that arrives as the
+        # thing it waits on completes (the last answer coming in, say), and the
+        # loop would carry on into the next gate.
+        while task and not task.done():
+            task.cancel()
+            await asyncio.wait({task}, timeout=0.5)
+        if room.state == "ended":      # it reached the end on its own meanwhile
+            return False
+        # the report and CSV describe what was actually asked, not the whole plan
+        room.questions = room.questions[:room.revealed]
+        await room.finish(quit=True)
+        if room.revealed:              # a room that never got going leaves no history
+            self._archive(room)
+        logging.getLogger("quiz").info("room %s ended by the host after %d question(s)",
+                                       room.code, room.revealed)
+        return True
 
     def reap(self):
         now = time.time()
