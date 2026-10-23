@@ -184,7 +184,7 @@ export function DartLoader({ size = 132, label = 'Loading', className = '' }) {
     With `to` the lockup is a link — the admin's way home from any screen.
     Without it, it is just the mark: a player's "home" is the room they are
     in, and `/` would drop them on the admin login. */
-export function Logo({ className = '', to, onClick }) {
+export function Logo({ className = '', to }) {
   const cls = `logo-lk inline-flex items-baseline font-extrabold tracking-[-0.015em] ${className}`
   const lockup = (
     <>
@@ -208,7 +208,7 @@ export function Logo({ className = '', to, onClick }) {
     </>
   )
   if (!to) return <span aria-label="ReHit" className={cls}>{lockup}</span>
-  return <Link to={to} onClick={onClick} aria-label="ReHit — home" className={cls}>{lockup}</Link>
+  return <Link to={to} aria-label="ReHit — home" className={cls}>{lockup}</Link>
 }
 
 /** The tagline as quiet chips — Recall / Hit / Repeat with option-tile chips
@@ -234,7 +234,7 @@ export function Screen({ children, className = '' }) {
   )
 }
 
-export function JoinStrip({ code, right, host = location.host, onHome }) {
+export function JoinStrip({ code, right, host = location.host }) {
   return (
     <div className="flex flex-none items-center gap-3 rounded-2xl border border-line
       px-[clamp(.8rem,1.6vw,1.4rem)] py-[clamp(.5rem,1vw,.9rem)]
@@ -242,7 +242,7 @@ export function JoinStrip({ code, right, host = location.host, onHome }) {
       {/* the strip is the only chrome on a projected screen, so the mark rides
           here rather than on each phase — present all game, never competing
           with the question */}
-      <Logo className="text-[1.35em]" to="/" onClick={onHome} />
+      <Logo className="text-[1.35em]" to="/" />
       <span aria-hidden="true" className="text-line">|</span>
       <span>Join at</span>
       <span className="font-extrabold text-ink">{host}</span>
