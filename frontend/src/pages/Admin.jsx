@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import { useNavigate, useParams } from 'react-router-dom'
 import QRCode from 'qrcode'
 import {
   login, createQuiz, downloadCsv, EXPORTS, activity, savedQuiz, runSavedQuiz,
@@ -14,13 +15,13 @@ import {
 } from '../ui.jsx'
 
 const TOKEN_KEY = 'quiz.token'
-const CODE_KEY = 'quiz.code'
 const BASE_KEY = 'quiz.base'   // public address players reach this host at
 const READ_KEY = 'quiz.read'   // seconds of reading time, for the builder hint
 
 /* Session lives in localStorage and the token is signed rather than stored on
-   the server, so a reload, a new tab, or a server restart all keep you logged in
-   and drop you back into the room you were hosting. */
+   the server, so a reload, a new tab, or a server restart all keep you logged in.
+   The room you are hosting is in the URL (/admin/quiz/<code>), so a reload lands
+   back on it and `/` is always the dashboard. */
 const blankQ = () => ({ text: '', timer: 20, options: ['', ''], correct: 0 })
 const todayName = () =>
   `Quiz — ${new Date().toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}`
@@ -77,28 +78,32 @@ const blankQuiz = () => ({ title: todayName(), capacity: 60, questions: [blankQ(
 
 export default function Admin() {
   const [token, setTok] = useState(() => localStorage.getItem(TOKEN_KEY))
-  const [code, setCod] = useState(() => localStorage.getItem(CODE_KEY))
+  const { code } = useParams()
+  const navigate = useNavigate()
   const [draft, setDraft] = useState(null)   // non-null while the builder is open
 
   const setToken = (t) => {
     t ? localStorage.setItem(TOKEN_KEY, t) : localStorage.removeItem(TOKEN_KEY)
     setTok(t)
   }
-  const setCode = (c) => {
-    c ? localStorage.setItem(CODE_KEY, c) : localStorage.removeItem(CODE_KEY)
-    setCod(c)
-  }
-  const logout = () => { setCode(null); setDraft(null); setToken(null) }
+  const openRoom = (c) => { setDraft(null); if (c) navigate(`/admin/quiz/${c}`) }
+  // not logging out of the room: it keeps running and stays under "Running now"
+  const goHome = () => navigate('/')
+  const logout = () => { setDraft(null); setToken(null) }
 
+  // on /admin/quiz/<code> with no session, log in right here and carry on into it
   if (!token) return <Login onToken={setToken} />
-  if (code) return <Host token={token} code={code} onExit={() => setCode(null)} onAuthFail={logout} />
+  if (code) {
+    return <Host key={code} token={token} code={code} onExit={goHome} onAuthFail={logout}
+      onGone={() => navigate('/', { replace: true })} />
+  }
   if (draft) {
     return <Builder token={token} initial={draft}
-      onCreated={(c) => { setDraft(null); setCode(c) }}
+      onCreated={openRoom}
       onCancel={() => setDraft(null)} onAuthFail={logout} />
   }
   return <Dashboard token={token} onNew={() => setDraft(blankQuiz())} onEdit={setDraft}
-    onOpen={setCode} onAuthFail={logout} />
+    onOpen={openRoom} onAuthFail={logout} />
 }
 
 /* ============================ login ============================ */
@@ -679,7 +684,7 @@ function Answered({ answered, total }) {
 }
 
 /* ============================ host console ============================ */
-function Host({ token, code, onExit, onAuthFail }) {
+function Host({ token, code, onExit, onGone, onAuthFail }) {
   const [lobby, setLobby] = useState({ players: [], count: 0, capacity: 0 })
   const [phase, setPhase] = useState('lobby')
   const [question, setQuestion] = useState(null)
@@ -704,7 +709,8 @@ function Host({ token, code, onExit, onAuthFail }) {
 
   const onMsg = useCallback((m) => {
     switch (m.type) {
-      case 'error': if (m.msg === 'Room not found') onExit(); break
+      // a dead link (reaped room, typo'd code) — replace it so Back does not loop
+      case 'error': if (m.msg === 'Room not found') onGone(); break
       // `waiting` is the between-questions lobby — the server holds the room
       // there until the host starts the next question
       case 'lobby': setLobby(m); if (m.state === 'waiting') setPhase('waiting'); break
@@ -731,7 +737,7 @@ function Host({ token, code, onExit, onAuthFail }) {
       case 'game_over': setOver(m); setPhase('over'); break
       default: break
     }
-  }, [onExit])
+  }, [onGone])
 
   const { status, send } = useSocket(wsUrl(`/ws/host/${code}?token=${token}`), onMsg)
   const waiting = phase === 'waiting'
@@ -777,9 +783,9 @@ function Host({ token, code, onExit, onAuthFail }) {
 
   return (
     <Screen>
-      {/* the mark is the way home: back to the dashboard, where this room stays
-          listed under "Running now" with Resume — same as the lobby's Back */}
-      <JoinStrip code={code} right={players} host={publicHost} onHome={onExit} />
+      {/* the mark links home: the dashboard, where this room stays listed under
+          "Running now" with Resume — same as the lobby's Back */}
+      <JoinStrip code={code} right={players} host={publicHost} />
 
       {/* The same screen opens the quiz and gates every question after it: the
           room code and a QR big enough to scan from a seat, who is in, and one

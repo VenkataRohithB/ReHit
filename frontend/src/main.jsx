@@ -14,6 +14,9 @@ createRoot(document.getElementById('root')).render(
     <BrowserRouter>
       <Routes>
         <Route path="/" element={<Admin />} />
+        {/* the host console has its own address, so home is always one click
+            (or one Back) away and a reload lands on the same room */}
+        <Route path="/admin/quiz/:code" element={<Admin />} />
         <Route path="/join/:code" element={<Play />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

@@ -55,7 +55,9 @@ link the host console shows (with QR).
 
 **Refreshing is safe.** Admin sessions are signed tokens rather than server-side
 state, held in `localStorage` — so a reload, a new tab, or a **server restart**
-all keep you logged in and drop you back into the room you were hosting. A player
+all keep you logged in. The host console lives at `/admin/quiz/<CODE>`, so a
+reload lands back on the room you were hosting, and the logo, **Back** or the
+browser's back button take you home to the dashboard at any point. A player
 rejoins their seat with their score and, mid-question, their locked-in answer.
 Reconnecting with the same email takes over the old session rather than being
 refused — last device in wins.
