@@ -234,7 +234,7 @@ export function Screen({ children, className = '' }) {
   )
 }
 
-export function JoinStrip({ code, right, host = location.host }) {
+export function JoinStrip({ code, right, host = location.host, action }) {
   return (
     <div className="flex flex-none items-center gap-3 rounded-2xl border border-line
       px-[clamp(.8rem,1.6vw,1.4rem)] py-[clamp(.5rem,1vw,.9rem)]
@@ -251,6 +251,7 @@ export function JoinStrip({ code, right, host = location.host }) {
         tracking-[.1em] text-anchor">{code}</span>
       <span className="flex-1" />
       <span className="font-semibold tabular-nums">{right}</span>
+      {action}
     </div>
   )
 }

@@ -370,6 +370,8 @@ async def ws_host(ws: WebSocket, code: str, token: str = Query(...)):
                 await room.send_board()
             elif kind == "next":
                 room.request_next()
+            elif kind == "quit":
+                await manager.quit(room)
     finally:
         room.hosts.discard(ws)
 
