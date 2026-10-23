@@ -779,7 +779,10 @@ function Host({ token, code, onExit, onGone, onAuthFail }) {
       setTimeout(() => setCopied(false), 1500)
     } catch { /* the URL is on screen anyway — copy it by hand */ }
   }
-  useEffect(() => { setAdvancing(false) }, [results, over])
+  // Any new screen means the press landed. Clearing only on new results left
+  // Next's press armed into the next question, so an open question's Finish
+  // (and a live poll's Close) came up greyed from Q2 on until a refresh.
+  useEffect(() => { setAdvancing(false) }, [results, over, phase])
 
   // Ends it for everyone, from any screen. Revealed questions stand and are
   // archived with their report; a question still open is dropped unscored.
