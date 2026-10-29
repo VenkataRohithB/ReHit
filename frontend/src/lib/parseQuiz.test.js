@@ -102,8 +102,7 @@ test('reports the line number for a question with no correct answer', () => {
   assert.match(errors[0].msg, /no correct answer/)
 })
 
-test('rejects two correct answers, too few options, and a bad timer', () => {
-  assert.match(parseQuiz('Q?\n* a\n* b').errors[0].msg, /2 correct answers/)
+test('rejects too few options and a bad timer', () => {
   assert.match(parseQuiz('Q?\n* only').errors[0].msg, /at least 2 options/)
   assert.match(parseQuiz('Q? [900]\n* a\n- b').errors[0].msg, /1 to 300/)
   assert.match(parseQuiz('Q?\n* a\n- b\n- c\n- d\n- e\n- f\n- g').errors[0].msg, /maximum is 6/)
@@ -180,4 +179,36 @@ test('a blank option above the answer does not move which one is correct', () =>
   const out = parseQuiz(formatQuiz(built)).questions[0]
   assert.deepEqual(out.options, ['Paris', 'Rome'])
   assert.equal(out.options[out.correct], 'Paris', 'the wrong option got marked correct')
+})
+
+test('several * marks make a select-all question', () => {
+  const { questions, errors } = parseQuiz('Which are primes? [15]\n* 2\n* 3\n- 4\n* 5\n\nCapital?\n* Paris\n- Rome')
+  assert.deepEqual(errors, [])
+  assert.deepEqual(questions[0], { text: 'Which are primes?', options: ['2', '3', '4', '5'],
+    correct: [0, 1, 3], multi: true, timer: 15 })
+  assert.equal(questions[1].correct, 0, 'one * stays a plain single answer')
+  assert.equal(questions[1].multi, undefined)
+})
+
+test('[multi] makes a one-answer select-all, and formatQuiz round-trips both kinds', () => {
+  const src = 'Pick the even one [20] [multi]\n- 1\n* 2\n- 3\n\nPick both [10]\n* a\n* b\n- c'
+  const first = parseQuiz(src)
+  assert.deepEqual(first.errors, [])
+  assert.deepEqual(first.questions[0], { text: 'Pick the even one', options: ['1', '2', '3'],
+    correct: [1], multi: true, timer: 20 })
+  assert.deepEqual(parseQuiz(formatQuiz(first.questions)).questions, first.questions)
+})
+
+test('a graded select-all needs at least one *', () => {
+  assert.match(parseQuiz('Q? [multi]\n- a\n- b').errors[0].msg, /no correct answers/)
+  assert.deepEqual(parseQuiz('Q? [multi]\n- a\n- b', false).errors, [], 'fine in a poll')
+})
+
+test('JSON takes a list for correct, by index or by text', () => {
+  const { questions, errors } = parseQuiz(JSON.stringify([
+    { text: 'Q?', options: ['a', 'b', 'c'], correct: [2, 'A'] },
+  ]))
+  assert.deepEqual(errors, [])
+  assert.deepEqual(questions[0].correct, [0, 2])
+  assert.equal(questions[0].multi, true)
 })

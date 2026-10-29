@@ -133,6 +133,23 @@ print(xs[-1])
 An **optional image** goes on its own line as `!https://…` (markdown
 `![alt](url)` also works). Images are referenced by URL — there is no upload.
 
+**Select-all questions (MSQ).** Mark more than one option with `*` and the
+question becomes "Select all that apply": players tick options and press
+**Submit**, and the speed clock stops at Submit. Scoring is all-or-nothing, so
+points only come for exactly the right set. If the clock runs out on someone who
+ticked but never pressed Submit, their ticks still count, scored as the slowest
+answer. Add `[multi]` to the question line for a select-all question with only one
+right answer. In the builder it is the **Multiple answers** box under the options,
+and in JSON `correct` takes a list (`"correct": [0, 2]`).
+
+```
+Which of these are prime? [20]
+* 2
+* 3
+- 4
+* 5
+```
+
 `[20]` after a question sets its timer in seconds (optional, defaults to 20).
 Blank lines between questions are optional. Problems are reported per line
 (`Line 5 — "Bad?" has no correct answer`) and valid questions still import, so

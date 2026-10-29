@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { mergeQuestion, isTimed } from './question.js'
+import { asList, sameAnswer, answerText, mergeQuestion, isTimed } from './question.js'
 
 // the two shapes the server actually sends, per Room.question_msg
 const reading = (i = 0) => ({
@@ -56,4 +56,15 @@ test('isTimed reads absence, not falsiness', () => {
   assert.equal(isTimed({ remaining: 0 }), true)
   assert.equal(isTimed({ elapsed: 12 }), false)
   assert.equal(isTimed(null), false)
+})
+
+test('select-all answers compare as sets and read as "A + C"', () => {
+  assert.deepEqual(asList(2), [2])
+  assert.deepEqual(asList(null), [])
+  assert.equal(sameAnswer([3, 0], [0, 3]), true)
+  assert.equal(sameAnswer([0], [0, 3]), false, 'one missing is wrong')
+  assert.equal(sameAnswer(1, 1), true)
+  assert.equal(sameAnswer(null, null), false, 'no answer is never right')
+  assert.equal(answerText(['2', '3', '4'], [0, 1]), '2 + 3')
+  assert.equal(answerText(['Paris', 'Rome'], 0), 'Paris')
 })

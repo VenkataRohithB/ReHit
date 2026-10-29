@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
+import { asList } from './lib/question.js'
 
 /* ============================ animation kit ============================
    Everything here is hand-rolled — no animation dependency. See DESIGN.md.
@@ -410,8 +411,12 @@ export function TimerRing({ remaining, total, qkey, className = '' }) {
 
 /* Result bars — race out with counting percentages, then everything except the
    correct answer greys out so the answer is the only thing left with colour. */
-export function ResultBars({ tally, options, correct, settleMs = 1500 }) {
-  const total = tally.reduce((a, b) => a + b, 0) || 1
+/** `of` is how many answered. On a select-all question one person adds to
+    several bars, so each bar is a share of the people, not of the picks.
+    `correct` is an index, or a list of them on a select-all question. */
+export function ResultBars({ tally, options, correct, of, settleMs = 1500 }) {
+  const total = of || tally.reduce((a, b) => a + b, 0) || 1
+  const key = asList(correct)
   const [settled, setSettled] = useState(false)
   useEffect(() => {
     setSettled(false)
@@ -426,7 +431,7 @@ export function ResultBars({ tally, options, correct, settleMs = 1500 }) {
         const pct = Math.round((tally[i] / total) * 100)
         // a poll has no answer key: nothing is right, so nothing dims and the bars
         // stay in full colour showing the distribution, which is the whole point
-        const right = correct != null && i === correct
+        const right = key.includes(i)
         const dim = settled && correct != null && !right
         return (
           <div key={i}
@@ -465,9 +470,10 @@ export function ResultBars({ tally, options, correct, settleMs = 1500 }) {
 
    Deliberately host-only. There is no player equivalent and there should not be:
    a phone showing the running count lets a late answerer follow the crowd. */
-export function PollColumns({ tally, options }) {
+export function PollColumns({ tally, options, of }) {
   const peak = Math.max(1, ...tally)
-  const votes = tally.reduce((a, b) => a + b, 0)
+  // a select-all poll passes `of` (people), since one person fills several columns
+  const votes = of || tally.reduce((a, b) => a + b, 0)
   return (
     <div className="flex min-h-0 flex-1 items-stretch justify-center
       gap-[clamp(.4rem,1.6vw,1.5rem)] px-[clamp(0rem,2vw,2rem)]">
