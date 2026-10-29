@@ -309,6 +309,9 @@ async def ws_play(ws: WebSocket, code: str, seat: str = Query(...), name: str = 
                 room.record_answer(seat, data.get("option"))
                 # carries the live tally too when this is a poll — hosts only
                 await room.send_hosts(room.progress_msg())
+            elif kind == "pick":
+                # a select-all tick before Submit: held, never shown to anyone
+                room.record_pick(seat, data.get("option"))
     finally:
         # only clear if we are still the live socket — a reconnect that took this
         # player over already installed its own, and must not be unregistered here

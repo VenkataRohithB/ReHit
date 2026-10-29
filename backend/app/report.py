@@ -32,9 +32,19 @@ def _status(ans):
     """How to read a missing answer. 'absent' is not 'skipped': someone who
     joined at question 4 never had the chance, and averaging them in as a wrong
     answer quietly punishes them for arriving late."""
+    from .game import picks_of
     if ans is None or ans.get("absent"):
         return "absent"
-    return "answered" if isinstance(ans.get("option"), int) else "skipped"
+    return "answered" if picks_of(ans.get("option")) else "skipped"
+
+
+def _letters(picks):
+    """A select-all answer reads "A + C"; a single one is just its letter."""
+    return " + ".join(_letter(j) for j in picks) if picks else None
+
+
+def _texts(opts, picks):
+    return " + ".join(opts[j] for j in picks) if picks else None
 
 
 def _pct(part, whole):
@@ -43,7 +53,7 @@ def _pct(part, whole):
 
 def build_report(room):
     """Everything about one game, as plain data."""
-    from .game import rank_players, dense_ranks
+    from .game import rank_players, dense_ranks, answer_key, picks_of
 
     ranking = rank_players(room.players.values())
     ranks = dense_ranks(ranking)
@@ -58,46 +68,49 @@ def build_report(room):
     questions = []
     for i, q in enumerate(room.questions):
         opts = q["options"]
-        correct = q.get("correct") if graded else None
+        key = answer_key(q) if graded else None
+        key_picks = sorted(key) if key else []
         rows = [(p, answer_of(p, i)) for p in ranking]
         answered = [(p, a) for p, a in rows if _status(a) == "answered"]
         skipped = [p for p, a in rows if _status(a) == "skipped"]
         absent = [p for p, a in rows if _status(a) == "absent"]
         counts = [0] * len(opts)
         for _, a in answered:
-            counts[a["option"]] += 1
+            for j in picks_of(a["option"]):
+                counts[j] += 1
         times = [a["time"] for _, a in answered if a.get("time") is not None]
         n_correct = sum(1 for _, a in answered if a.get("correct"))
 
         # the wrong option that pulled the most people — the one worth talking
         # about when you go back over the question
         distractor = None
-        if correct is not None:
-            wrong = [(n, j) for j, n in enumerate(counts) if j != correct and n]
+        if key is not None:
+            wrong = [(n, j) for j, n in enumerate(counts) if j not in key and n]
             if wrong:
                 n, j = max(wrong)
                 distractor = {"option": _letter(j), "text": opts[j], "count": n,
                               "percent": _pct(n, len(answered))}
 
-        pct_correct = _pct(n_correct, len(answered)) if correct is not None else None
+        pct_correct = _pct(n_correct, len(answered)) if key is not None else None
         questions.append({
             "number": i + 1,
             "text": q["text"],
+            "multi": bool(q.get("multi")),
             "timer_seconds": q.get("timer"),
             "code": q.get("code"),
             "image": q.get("image"),
-            "correct_option": _letter(correct) if correct is not None else None,
-            "correct_answer": opts[correct] if correct is not None else None,
+            "correct_option": _letters(key_picks),
+            "correct_answer": _texts(opts, key_picks),
             "options": [{
-                "option": _letter(j), "text": t, "is_correct": j == correct,
+                "option": _letter(j), "text": t, "is_correct": bool(key) and j in key,
                 "count": counts[j], "percent": _pct(counts[j], len(answered)),
             } for j, t in enumerate(opts)],
             "stats": {
                 "answered": len(answered),
                 "skipped": len(skipped),
                 "absent": len(absent),
-                "correct": n_correct if correct is not None else None,
-                "incorrect": len(answered) - n_correct if correct is not None else None,
+                "correct": n_correct if key is not None else None,
+                "incorrect": len(answered) - n_correct if key is not None else None,
                 "percent_correct": pct_correct,
                 # a share of those who could answer, not of the whole room
                 "response_rate": _pct(len(answered), len(answered) + len(skipped)),
@@ -116,12 +129,12 @@ def build_report(room):
         for i, q in enumerate(room.questions):
             a = answer_of(p, i)
             st = _status(a)
-            opt = a["option"] if st == "answered" else None
+            picks = picks_of(a["option"]) if st == "answered" else []
             responses.append({
                 "question_number": i + 1,
                 "status": st,
-                "option": _letter(opt) if opt is not None else None,
-                "answer": q["options"][opt] if opt is not None else None,
+                "option": _letters(picks),
+                "answer": _texts(q["options"], picks),
                 "is_correct": bool(a.get("correct")) if st == "answered" and graded else None,
                 "points": a.get("points") if st == "answered" else 0,
                 "seconds": a.get("time") if st == "answered" else None,

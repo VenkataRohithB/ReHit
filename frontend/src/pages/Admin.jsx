@@ -7,7 +7,7 @@ import {
   wsUrl, AuthError,
 } from '../lib/api.js'
 import { parseQuiz, formatQuiz, EXAMPLE } from '../lib/parseQuiz.js'
-import { mergeQuestion, isTimed } from '../lib/question.js'
+import { mergeQuestion, isTimed, asList, answerText } from '../lib/question.js'
 import { useSocket } from '../lib/useSocket.js'
 import {
   Screen, JoinStrip, Button, TimerRing, OptionKey, ResultBars, RaceBoard,
@@ -445,6 +445,11 @@ function Builder({ token, initial, onCreated, onCancel, onAuthFail }) {
      room; onCreated(null) already routes there. */
   const create = async (run) => {
     if (!title.trim()) { setErr('Give the quiz a name so you can find it again'); return }
+    // all-or-nothing needs something to match: a graded select-all with no tick
+    // could never be answered right
+    const unkeyed = settle(mode).grading === 'graded'
+      ? questions.findIndex((q) => q.multi && q.text.trim() && !asList(q.correct).length) : -1
+    if (unkeyed >= 0) { setErr(`Q${unkeyed + 1} needs at least one correct answer ticked`); return }
     setErr(''); setBusy(run ? 'start' : 'save')
     try {
       onCreated(await createQuiz(token, {
@@ -457,6 +462,7 @@ function Builder({ token, initial, onCreated, onCancel, onAuthFail }) {
           text: q.text.trim(), timer: Number(q.timer) || 20,
           options: q.options,
           correct: q.correct,
+          multi: !!q.multi,
           code: q.code?.trim() ? q.code : null,   // omit the optional extras when unused
           image: q.image?.trim() ? q.image.trim() : null,
         })),
@@ -607,8 +613,15 @@ function Builder({ token, initial, onCreated, onCancel, onAuthFail }) {
                 const t = tone(oi)
                 return (
                   <div key={oi} className={`flex items-center gap-3 rounded-xl ${t.fill} px-3 py-2`}>
-                    <input type="radio" name={`c${qi}`} checked={q.correct === oi}
-                      onChange={() => patch(qi, (x) => ({ ...x, correct: oi }))}
+                    {/* a select-all question ticks every right option */}
+                    <input type={q.multi ? 'checkbox' : 'radio'} name={`c${qi}`}
+                      checked={q.multi ? asList(q.correct).includes(oi) : q.correct === oi}
+                      onChange={() => patch(qi, (x) => ({
+                        ...x,
+                        correct: !x.multi ? oi : asList(x.correct).includes(oi)
+                          ? asList(x.correct).filter((c) => c !== oi)
+                          : [...asList(x.correct), oi].sort((a, b) => a - b),
+                      }))}
                       aria-label={`Mark option ${t.key} correct`} className="size-4 accent-mint-ink" />
                     <OptionKey className={t.ink}>{t.key}</OptionKey>
                     <input value={opt} placeholder={`Option ${t.key}`} aria-label={`Option ${t.key}`}
@@ -622,19 +635,33 @@ function Builder({ token, initial, onCreated, onCancel, onAuthFail }) {
                         onClick={() => patch(qi, (x) => ({
                           ...x,
                           options: x.options.filter((_, i) => i !== oi),
-                          correct: x.correct >= oi && x.correct > 0 ? x.correct - 1 : x.correct,
+                          correct: x.multi
+                            ? asList(x.correct).filter((c) => c !== oi).map((c) => (c > oi ? c - 1 : c))
+                            : x.correct >= oi && x.correct > 0 ? x.correct - 1 : x.correct,
                         }))}
                         className={`font-bold opacity-50 hover:opacity-100 ${t.ink}`}>✕</button>
                     )}
                   </div>
                 )
               })}
-              {q.options.length < 6 && (
-                <button onClick={() => patch(qi, (x) => ({ ...x, options: [...x.options, ''] }))}
-                  className="self-start text-sm font-semibold text-anchor hover:underline">
-                  + Add option
-                </button>
-              )}
+              <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
+                {q.options.length < 6 && (
+                  <button onClick={() => patch(qi, (x) => ({ ...x, options: [...x.options, ''] }))}
+                    className="text-sm font-semibold text-anchor hover:underline">
+                    + Add option
+                  </button>
+                )}
+                {/* switching keeps what was marked: one becomes a list, a list
+                    keeps its first */}
+                <label className="flex cursor-pointer items-center gap-2 text-sm font-semibold text-muted">
+                  <input type="checkbox" checked={!!q.multi} className="size-4 accent-anchor"
+                    onChange={(e) => patch(qi, (x) => ({
+                      ...x, multi: e.target.checked,
+                      correct: e.target.checked ? asList(x.correct) : (asList(x.correct)[0] ?? 0),
+                    }))} />
+                  Multiple answers · select all that apply
+                </label>
+              </div>
             </div>
           </div>
         ))}
@@ -870,6 +897,11 @@ function Host({ token, code, onExit, onGone, onAuthFail }) {
         <>
           <h2 className="flex-none text-[clamp(1.4rem,4.2vw,4rem)] font-extrabold leading-tight
             tracking-tight text-balance">{question.text}</h2>
+          {question.multi && (
+            <p className="-mt-2 flex-none text-[clamp(.9rem,1.8vw,1.5rem)] font-semibold text-anchor">
+              Select all that apply
+            </p>
+          )}
           <QuestionMedia code={question.code} image={question.image} />
 
           {question.phase === 'reading' ? (
@@ -886,7 +918,8 @@ function Host({ token, code, onExit, onGone, onAuthFail }) {
               {/* a live poll fills its columns as the taps land; every other
                   question just shows the options and keeps the counts private */}
               {question.tally ? (
-                <PollColumns tally={question.tally} options={question.options} />
+                <PollColumns tally={question.tally} options={question.options}
+                  of={question.multi ? progress.answered : undefined} />
               ) : (
                 <div className="grid flex-1 grid-cols-1 gap-3 sm:grid-cols-2">
                   {question.options.map((o, i) => {
@@ -937,15 +970,16 @@ function Host({ token, code, onExit, onGone, onAuthFail }) {
           {/* a live poll settles into the columns it just filled, rather than
               swapping to a different chart of the same numbers */}
           {results.poll || question?.tally
-            ? <PollColumns tally={results.tally} options={results.options} />
+            ? <PollColumns tally={results.tally} options={results.options}
+                of={results.multi ? results.answered : undefined} />
             : <ResultBars tally={results.tally} options={results.options}
-                correct={results.correct} />}
+                correct={results.correct} of={results.answered} />}
           <div className="flex flex-none items-center justify-between gap-4">
             <span className="font-semibold text-muted">
               {results.correct != null
-                ? <>Correct answer · {results.options[results.correct]} ·{' '}
-                  {results.tally[results.correct]} of {results.total_players} got it</>
-                : <>{results.tally.reduce((a, b) => a + b, 0)} of {results.total_players} answered</>}
+                ? <>Correct answer{results.multi ? 's' : ''} · {answerText(results.options, results.correct)} ·{' '}
+                  {results.got_it ?? results.tally[results.correct]} of {results.total_players} got it</>
+                : <>{results.answered ?? results.tally.reduce((a, b) => a + b, 0)} of {results.total_players} answered</>}
             </span>
             {/* one forward button, whatever comes next — with no leaderboard to show,
                 this is the only thing that advances the room */}

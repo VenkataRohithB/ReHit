@@ -986,6 +986,110 @@ def test_a_console_that_misses_a_send_is_hung_up_so_it_resyncs():
 
     asyncio.run(drive())
 
+
+def test_select_all_questions_validate_into_one_shape():
+    """Several marked correct makes a question select-all; select-all keeps a
+    sorted list, single-answer keeps an int, and blanks move the key with them."""
+    from app.models import QuizIn, QuestionIn
+    q = QuestionIn(text="Q", options=["a", "", "b", "c"], correct=[3, 0])
+    assert q.multi is True and q.options == ["a", "b", "c"] and q.correct == [0, 2]
+    one = QuestionIn(text="Q", options=["a", "b"], correct=[1], multi=True)
+    assert one.multi and one.correct == [1], "select-all with one right answer stays a list"
+    single = QuestionIn(text="Q", options=["a", "b"], correct=[1])
+    assert single.multi is False and single.correct == 1, "one tick without multi is a plain MCQ"
+    try:
+        QuizIn(title="T", capacity=5, mode={},
+               questions=[{"text": "Q", "options": ["a", "b"], "correct": [], "multi": True}])
+        raise AssertionError("a graded select-all with no key must be refused")
+    except ValueError:
+        pass
+    # `mode` left out entirely is a graded quiz too, and must not crash the check
+    plain = QuizIn(title="T", capacity=5, questions=[{"text": "Q", "options": ["a", "b"], "correct": 0}])
+    assert plain.questions[0].correct == 0
+    try:
+        QuizIn(title="T", capacity=5,
+               questions=[{"text": "Q", "options": ["a", "b"], "multi": True}])
+        raise AssertionError("no mode still means graded")
+    except ValueError:
+        pass
+    poll = QuizIn(title="T", capacity=5, mode={"grading": "livepoll"},
+                  questions=[{"text": "Q", "options": ["a", "b"], "multi": True}])
+    assert poll.questions[0].multi and poll.questions[0].correct is None
+
+
+def test_select_all_is_all_or_nothing_and_ticks_count_when_time_runs_out():
+    """Exact set scores; one missing or one extra scores 0. Someone who ticked but
+    never pressed Submit is counted anyway, at the slowest speed."""
+    import asyncio
+
+    async def drive():
+        qs = [{"text": "Pick primes", "options": ["2", "3", "4", "5"],
+               "correct": [0, 1, 3], "multi": True, "timer": 2}]
+        r = Room("MSQ", 60, qs, advance_timeout=900, title="T")
+        r.read_secs = 0
+        for e in "exact missing extra ticker idle".split():
+            r.players[e] = Player(e)
+        task = asyncio.create_task(r.run())
+        await asyncio.sleep(0.05)
+        assert r.question_msg()["multi"] is True
+
+        # a single-answer payload is not an answer here, and nor is an empty set
+        assert r.record_answer("exact", 0) is None
+        assert r.record_answer("exact", []) is None
+        assert r.record_answer("exact", [3, 0, 1, 1]) is True
+        r.record_answer("missing", [0, 1])
+        r.record_answer("extra", [0, 1, 2, 3])
+        r.record_pick("ticker", [3, 1])
+        r.record_pick("ticker", [0, 1, 3])                # changed their mind, then the clock ran out
+        assert r.resume_msg_for(r.players["ticker"])["your_picks"] == [0, 1, 3]
+        await asyncio.sleep(2.2)
+        assert r.state == "results", r.state
+
+        a = {e: r.players[e].answers[0] for e in r.players}
+        assert a["exact"]["option"] == [0, 1, 3] and a["exact"]["correct"]
+        assert a["exact"]["points"] > 500
+        assert not a["missing"]["correct"] and a["missing"]["points"] == 0
+        assert not a["extra"]["correct"] and a["extra"]["points"] == 0
+        assert a["ticker"]["correct"] and a["ticker"]["points"] == 500, "auto-submit scores as the slowest"
+        assert a["idle"]["option"] is None
+
+        res = r.last_results
+        assert res["multi"] and res["correct"] == [0, 1, 3] and res["got_it"] == 2
+        assert res["answered"] == 4 and res["tally"] == [4, 4, 1, 3]
+
+        csv_text = build_csv(r)
+        assert "2 + 3 + 5" in csv_text and "2 + 3 + 4 + 5" in csv_text
+        from app.report import build_report
+        rep = build_report(r)
+        q = rep["questions"][0]
+        assert q["multi"] and q["correct_option"] == "A + B + D"
+        assert q["stats"]["correct"] == 2 and q["stats"]["top_distractor"]["option"] == "C"
+        by = {p["name"]: p["responses"][0] for p in rep["participants"]}
+        assert by["extra"]["option"] == "A + B + C + D" and by["idle"]["status"] == "skipped"
+        task.cancel()
+
+    asyncio.run(drive())
+
+
+def test_a_single_answer_question_ignores_lists_and_picks():
+    """MCQ behaves exactly as before: a list is not an answer and ticks do nothing."""
+    import asyncio
+
+    async def drive():
+        r = mkroom(timer=5)
+        r.read_secs = 0
+        r.players["a"] = Player("a")
+        task = asyncio.create_task(r.run())
+        await asyncio.sleep(0.05)
+        assert "multi" not in r.question_msg()
+        r.record_pick("a", [1])
+        assert not r.drafts
+        assert r.record_answer("a", [1]) is None
+        assert r.record_answer("a", 1) is True
+        task.cancel()
+
+    asyncio.run(drive())
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

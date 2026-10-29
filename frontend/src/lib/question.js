@@ -21,6 +21,21 @@ export function mergeQuestion(current, incoming) {
   return { ...kept, ...incoming }
 }
 
+/** An answer or an answer key as a list of option indexes: a single-answer
+ *  question uses one index, a select-all question a list, no answer null. */
+export const asList = (x) => (x == null ? [] : Array.isArray(x) ? x : [x])
+
+/** Same options picked, order aside. All-or-nothing, like the server's check. */
+export const sameAnswer = (a, b) => {
+  const x = asList(a)
+  const y = asList(b)
+  return x.length > 0 && x.length === y.length && x.every((i) => y.includes(i))
+}
+
+/** "Paris", or "2 + 3 + 5" for a select-all answer. */
+export const answerText = (options, x) =>
+  asList(x).map((i) => options?.[i]).filter((s) => s != null).join(' + ')
+
 /** True when this question runs on a clock. An open question has no deadline to
  *  count down to, so the console shows a stopwatch and a close button instead. */
 export const isTimed = (q) => q != null && q.remaining != null

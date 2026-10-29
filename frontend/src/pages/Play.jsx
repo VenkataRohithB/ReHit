@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { wsUrl, roomInfo } from '../lib/api.js'
 import { useSocket } from '../lib/useSocket.js'
+import { asList, sameAnswer, answerText } from '../lib/question.js'
 import {
   Screen, Button, TimerBar, OptionKey, Leaderboard, QuestionMedia, Ticker, faceOf, clock,
   tone, useCountdown, useStopwatch, Logo, QuizTagline,
@@ -37,6 +38,10 @@ export default function Play() {
   const [view, setView] = useState({ screen: 'lobby' })
   const [picked, setPicked] = useState(null)     // confirmed sent to the server
   const [pending, setPending] = useState(null)   // tapped, but the socket was down
+  // select-all ticks before Submit. Each change is sent as a draft too, so the
+  // ticks still count if the clock runs out before Submit is pressed
+  const [ticks, setTicks] = useState([])
+  const onIndex = useRef(null)                   // which question the ticks belong to
 
   const onMsg = useCallback((m) => {
     switch (m.type) {
@@ -50,11 +55,17 @@ export default function Play() {
         setLobby(m)
         // between questions the room goes back to the join screen, so a phone
         // still sitting on the last leaderboard comes back with it
-        if (m.state === 'waiting') { setView({ screen: 'lobby' }); setPicked(null); setPending(null) }
+        if (m.state === 'waiting') {
+          setView({ screen: 'lobby' }); setPicked(null); setPending(null); setTicks([])
+        }
         break
       case 'question':
         // your_answer is present when we refreshed after already answering
         setPicked(m.your_answer ?? null); setPending(null)
+        // the server's copy wins on a resume; otherwise keep ticks within the
+        // same question (reading -> answering) and clear them for a new one
+        setTicks((t) => m.your_picks ?? (onIndex.current === m.index ? t : []))
+        onIndex.current = m.index
         setView({ screen: 'question', ...m }); break
       case 'results': setView({ screen: 'results', ...m }); break
       // the standings arrive separately, when the host reveals them — merged in
@@ -86,6 +97,9 @@ export default function Play() {
   // for that — without this clause every tile would lock the instant it appeared
   const timeUp = isQuestion && !reading && view.remaining != null && timeLeft <= 0
   const scored = view.your_score != null
+  // what this phone answered — ticks that were never submitted still went in
+  // when the clock ran out
+  const mine = picked ?? (ticks.length ? ticks : null)
 
   const doJoin = (e) => {
     e.preventDefault()
@@ -103,6 +117,25 @@ export default function Play() {
     if (send({ type: 'answer', option: i })) { setPicked(i); setPending(null) }
     else setPending(i)
   }
+
+  const multi = !!view.multi
+  const toggle = (i) => {
+    if (picked != null || timeUp) return
+    const next = ticks.includes(i) ? ticks.filter((x) => x !== i) : [...ticks, i].sort((a, b) => a - b)
+    setTicks(next)
+    send({ type: 'pick', option: next })   // best effort; resent below after a reconnect
+  }
+  const submit = () => {
+    if (picked != null || !ticks.length) return
+    if (send({ type: 'answer', option: ticks })) { setPicked(ticks); setPending(null) }
+    else setPending(ticks)
+  }
+
+  // Ticks made while the socket was down never reached the server as a draft.
+  useEffect(() => {
+    if (status !== 'open' || !multi || picked != null || pending != null || !ticks.length) return
+    if (isQuestion && !reading) send({ type: 'pick', option: ticks })
+  }, [status, multi, picked, pending, isQuestion, reading, view.index])
 
   // Reconnected with an undelivered answer and the question is still open — send it.
   useEffect(() => {
@@ -185,6 +218,7 @@ export default function Play() {
           <TimerBar remaining={view.remaining} total={view.window} qkey={`r${view.index}`} />
           <h2 className="flex-none text-[clamp(1.35rem,6vw,1.9rem)] font-extrabold leading-tight
             tracking-tight text-balance">{view.text}</h2>
+          {multi && <p className="-mt-1 flex-none font-semibold text-anchor">Select all that apply</p>}
           <QuestionMedia code={view.code} image={view.image} />
           <div className="flex flex-1 flex-col items-center justify-center gap-2 text-center">
             <div className="text-[clamp(2.6rem,16vw,4.5rem)] font-extrabold tabular-nums text-anchor">
@@ -201,15 +235,20 @@ export default function Play() {
           {view.remaining != null && <TimerBar remaining={view.remaining} total={view.window} qkey={view.index} />}
           <h2 className="flex-none text-[clamp(1.35rem,6vw,1.9rem)] font-extrabold leading-tight
             tracking-tight text-balance">{view.text}</h2>
+          {multi && <p className="-mt-1 flex-none font-semibold text-anchor">Select all that apply</p>}
           <QuestionMedia code={view.code} image={view.image} />
           <div className="flex flex-1 flex-col justify-center gap-3">
             {view.options.map((opt, i) => {
               const t = tone(i)
-              const isPick = picked === i || pending === i
+              // a select-all question shows its ticks; a single one its tap
+              const isPick = multi
+                ? (picked != null ? asList(picked) : asList(pending ?? ticks)).includes(i)
+                : picked === i || pending === i
               // a pending tap does NOT lock — re-tapping is how you retry
               const locked = picked != null || timeUp
               return (
-                <button key={i} onClick={() => answer(i)} disabled={locked}
+                <button key={i} onClick={() => (multi ? toggle(i) : answer(i))} disabled={locked}
+                  aria-pressed={multi ? isPick : undefined}
                   style={{ animationDelay: `${i * 70}ms` }}
                   className={`anim-pop flex min-h-14 items-center gap-3 rounded-3xl px-4 py-4 text-left
                     text-[clamp(1rem,4.4vw,1.3rem)] font-semibold transition
@@ -218,18 +257,27 @@ export default function Play() {
                     ${isPick ? `ring-4 ring-inset ${t.ring}` : ''}
                     ${locked && !isPick ? 'opacity-40' : ''}`}>
                   <OptionKey>{t.key}</OptionKey>{opt}
+                  {multi && isPick && <span aria-hidden="true" className="ml-auto font-extrabold">✓</span>}
                 </button>
               )
             })}
           </div>
+          {multi && picked == null && !timeUp && (
+            <Button onClick={submit} disabled={!ticks.length} className="flex-none py-4 text-lg">
+              Submit
+            </Button>
+          )}
           {/* never leave live-looking tiles up after the clock runs out, and never
               claim "locked in" for an answer the server has not acknowledged */}
           <p className={`flex-none text-center text-sm font-semibold
             ${pending != null || status !== 'open' ? 'text-peach-ink' : 'text-muted'}`}>
             {pending != null ? 'Still sending — tap again if this stays up'
               : status !== 'open' ? 'Offline — reconnecting…'
-                : timeUp ? "Time's up — results coming…"
-                  : picked == null ? 'Tap your answer' : 'Locked in — waiting for the others…'}
+                : timeUp ? (multi && picked == null && ticks.length
+                  ? "Time's up — your ticks count, results coming…" : "Time's up — results coming…")
+                  : picked != null ? 'Locked in — waiting for the others…'
+                    : !multi ? 'Tap your answer'
+                      : ticks.length ? 'Press Submit to lock it in' : 'Tick every answer that applies'}
           </p>
         </>
       )}
@@ -242,14 +290,14 @@ export default function Play() {
             <div className={`anim-pop text-[clamp(2.6rem,16vw,5rem)] font-extrabold tracking-tight
               ${view.gained > 0 ? 'text-mint-ink' : 'text-muted'}`}>
               {scored ? <>+<Ticker to={view.gained} ms={800} /></>
-                : view.correct != null ? (picked === view.correct ? 'Correct' : 'Not this time')
+                : view.correct != null ? (sameAnswer(mine, view.correct) ? 'Correct' : 'Not this time')
                   : 'Answered'}
             </div>
             <p className="font-semibold text-muted">
               {view.correct != null
-                ? <>{(scored ? view.gained > 0 : picked === view.correct) ? 'Correct' : 'Not this time'}
-                  {' · '}{view.options[view.correct]}</>
-                : picked != null ? <>You picked · {view.options[picked]}</> : 'Answer recorded'}
+                ? <>{(scored ? view.gained > 0 : sameAnswer(mine, view.correct)) ? 'Correct' : 'Not this time'}
+                  {' · '}{answerText(view.options, view.correct)}</>
+                : mine != null ? <>You picked · {answerText(view.options, mine)}</> : 'Answer recorded'}
             </p>
           </div>
           {view.leaderboard?.length > 0 &&

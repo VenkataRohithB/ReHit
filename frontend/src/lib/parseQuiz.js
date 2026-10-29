@@ -11,9 +11,12 @@
  *   * Paris
  *   - Rome
  *
- * Rules: option lines begin with - or *, and * marks the correct one. Any other
- * line starts a new question; a trailing [20] sets that question's timer in
- * seconds. Blank lines are ignored, so questions may be separated by them or not.
+ * Rules: option lines begin with - or *, and * marks the correct one. Mark more
+ * than one with * and it becomes a select-all question ("Select all that
+ * apply", all-or-nothing); [multi] on the question line makes one select-all
+ * even with a single * marked. Any other line starts a new question; a trailing
+ * [20] sets that question's timer in seconds. Blank lines are ignored, so
+ * questions may be separated by them or not.
  *
  * A question may also carry an optional code snippet, fenced in ``` and placed
  * before its options — inside the fence every line is taken verbatim, so code
@@ -28,6 +31,8 @@
    only what config.py defaults to, so a paste checked before the first login is
    still checked against something sane. The API re-validates regardless; these
    exist to name the offending line instead of failing the whole save. */
+import { asList } from './question.js'
+
 export const LIMITS = { questions: 50, options: 6, timer: 300, code: 2000 }
 export const DEFAULT_TIMER = 20
 
@@ -54,6 +59,7 @@ Which data structure gives O(1) average lookup? [15]
 
 const OPTION_RE = /^\s*([-*])\s*(.+?)\s*$/
 const TIMER_RE = /\s*\[(\d+)\s*s?\]\s*$/i
+const MULTI_RE = /\s*\[multi\]\s*/i
 const FENCE_RE = /^\s*```/
 const IMAGE_RE = /^\s*!\s*(?:\[[^\]]*\]\()?\s*(https?:\/\/\S+?)\s*\)?\s*$/i
 
@@ -72,11 +78,9 @@ function checkQuestion(q, errors, graded) {
   // a poll has no answer key. Still an error for a graded quiz, though: silently
   // accepting an unmarked question would make it unanswerable at run time.
   if (graded && q.correct == null) {
-    errors.push(err(q.line, `"${trunc(q.text)}" has no correct answer — mark one option with *`))
-    return false
-  }
-  if (q.correctCount > 1) {
-    errors.push(err(q.line, `"${trunc(q.text)}" marks ${q.correctCount} correct answers — mark exactly one with *`))
+    errors.push(err(q.line, q.multi
+      ? `"${trunc(q.text)}" has no correct answers — mark at least one option with *`
+      : `"${trunc(q.text)}" has no correct answer — mark one option with *`))
     return false
   }
   if (!(q.timer >= 1 && q.timer <= LIMITS.timer)) {
@@ -100,6 +104,7 @@ const trunc = (s) => (s.length > 34 ? s.slice(0, 34) + '…' : s)
 /** Only emit the optional keys when they are actually used. */
 const clean = (q) => {
   const out = { text: q.text, options: q.options, correct: q.correct, timer: q.timer }
+  if (q.multi) out.multi = true
   const code = (q.code || []).join('\n').replace(/\s+$/, '')
   if (code.trim()) out.code = code
   if (q.image) out.image = q.image
@@ -113,7 +118,12 @@ function parseText(input, graded) {
   let fencedAt = 0        // line the open ``` sits on, 0 when not inside a block
 
   const flush = () => {
-    if (cur && checkQuestion(cur, errors, graded)) questions.push(clean(cur))
+    if (cur) {
+      // several * marks make it select-all; one stays a plain index
+      cur.multi = cur.multi || cur.marks.length > 1
+      cur.correct = cur.multi ? (cur.marks.length ? cur.marks : null) : (cur.marks[0] ?? null)
+      if (checkQuestion(cur, errors, graded)) questions.push(clean(cur))
+    }
     cur = null
   }
 
@@ -152,16 +162,15 @@ function parseText(input, graded) {
         errors.push(err(line, `Option "${trunc(opt[2])}" appears before any question`))
         return
       }
-      if (opt[1] === '*') {
-        cur.correctCount++
-        if (cur.correct == null) cur.correct = cur.options.length
-      }
+      if (opt[1] === '*') cur.marks.push(cur.options.length)
       cur.options.push(opt[2])
       return
     }
 
     flush()
     let text = raw.trim()
+    const multi = MULTI_RE.test(text)
+    if (multi) text = text.replace(MULTI_RE, ' ').trim()
     let timer = DEFAULT_TIMER
     const t = text.match(TIMER_RE)
     if (t) {
@@ -173,7 +182,7 @@ function parseText(input, graded) {
       cur = null
       return
     }
-    cur = { text, timer, options: [], correct: null, correctCount: 0, line, code: [], image: null }
+    cur = { text, timer, options: [], marks: [], multi, correct: null, line, code: [], image: null }
   })
 
   if (fencedAt) errors.push(err(fencedAt, 'This code block is never closed — add a matching ```'))
@@ -205,24 +214,29 @@ function parseJson(input, graded) {
     const options = Array.isArray(raw?.options) ? raw.options.map((o) => String(o).trim()).filter(Boolean) : []
     if (!text) { errors.push(err(at, `Question ${at} has no text`)); return }
 
-    // correct may be an index or the answer's own text
-    let correct = raw?.correct ?? raw?.answer
-    if (typeof correct === 'string') {
-      const hit = options.findIndex((o) => o.toLowerCase() === correct.trim().toLowerCase())
-      correct = hit < 0 ? null : hit
-    }
-    const validCorrect = typeof correct === 'number' && Number.isInteger(correct) &&
-      correct >= 0 && correct < options.length
-    if (!validCorrect) {
-      if (graded) {
-        errors.push(err(at, `Question ${at} ("${trunc(text)}") has no valid correct answer`))
-        return
+    // correct may be an index or the answer's own text — or a list of either,
+    // which makes it a select-all question
+    const given = raw?.correct ?? raw?.answer
+    const resolve = (c) => {
+      if (typeof c === 'string') {
+        const hit = options.findIndex((o) => o.toLowerCase() === c.trim().toLowerCase())
+        return hit < 0 ? null : hit
       }
-      correct = null            // a poll question simply has no answer key
+      return Number.isInteger(c) && c >= 0 && c < options.length ? c : null
     }
+    const list = Array.isArray(given) ? given.map(resolve) : given == null ? [] : [resolve(given)]
+    const valid = list.length > 0 && list.every((c) => c != null)
+    const marks = valid ? [...new Set(list)].sort((a, b) => a - b) : []
+    const multi = raw?.multi === true || marks.length > 1
+    if (!valid && given != null && graded) {
+      errors.push(err(at, `Question ${at} ("${trunc(text)}") has no valid correct answer`))
+      return
+    }
+    // a poll question simply has no answer key
+    const correct = multi ? (marks.length ? marks : null) : (marks[0] ?? null)
     const codeStr = typeof raw?.code === 'string' ? raw.code.replace(/\s+$/, '') : ''
     const q = {
-      text, options, correct, correctCount: correct == null ? 0 : 1,
+      text, options, correct, multi,
       timer: Number(raw?.timer) || DEFAULT_TIMER, line: at,
       code: codeStr ? codeStr.split('\n') : [],
       image: typeof raw?.image === 'string' && raw.image.trim() ? raw.image.trim() : null,
@@ -239,7 +253,10 @@ export function formatQuiz(questions) {
   return (questions || [])
     .filter((q) => (q.text || '').trim())
     .map((q) => {
-      const out = [`${q.text.trim()} [${Number(q.timer) || DEFAULT_TIMER}]`]
+      const marked = new Set(asList(q.correct))
+      // several * already say select-all; only a one-answer select-all needs the tag
+      const tag = q.multi && marked.size < 2 ? ' [multi]' : ''
+      const out = [`${q.text.trim()} [${Number(q.timer) || DEFAULT_TIMER}]${tag}`]
       if ((q.code || '').trim()) {
         out.push('```', ...String(q.code).replace(/\s+$/, '').split(/\r?\n/), '```')
       }
@@ -247,7 +264,7 @@ export function formatQuiz(questions) {
       // blank options are dropped here, so `correct` is matched on the ORIGINAL
       // index — using the shifted one silently marks a different answer correct
       q.options
-        .map((o, i) => ({ text: (o || '').trim(), correct: q.correct != null && i === q.correct }))
+        .map((o, i) => ({ text: (o || '').trim(), correct: marked.has(i) }))
         .filter((o) => o.text)
         .forEach((o) => out.push(`${o.correct ? '*' : '-'} ${o.text}`))
       return out.join('\n')

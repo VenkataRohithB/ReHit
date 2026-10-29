@@ -106,12 +106,35 @@ def dense_ranks(ranking):
     return out
 
 
+def picks_of(opt):
+    """An answer (or an answer key) as a list of option indexes: one for a
+    single-answer question, any number for a select-all one, none for no answer."""
+    if opt is None:
+        return []
+    return list(opt) if isinstance(opt, (list, tuple)) else [opt]
+
+
+def answer_key(q):
+    """The correct options as a set, or None when the question has no key."""
+    key = set(picks_of(q.get("correct")))
+    return key or None
+
+
+def is_right(q, opt):
+    """All-or-nothing: a select-all question is right only when exactly the
+    correct set was picked. One missed or one extra is wrong."""
+    key = answer_key(q)
+    return key is not None and set(picks_of(opt)) == key
+
+
 def tally_of(responses, n_options):
-    """Votes per option. record_answer has already proved every index is in
-    range, so this never has to defend against a stray one."""
+    """Picks per option. On a select-all question one person adds to several
+    options, so these can sum past the number who answered. record_answer has
+    already proved every index is in range."""
     counts = [0] * n_options
     for opt, _ in responses.values():
-        counts[opt] += 1
+        for j in picks_of(opt):
+            counts[j] += 1
     return counts
 
 
@@ -194,6 +217,9 @@ class Room:
         self.q_start = 0.0
         self.q_ends = 0.0
         self.responses: dict[str, tuple] = {}
+        # select-all ticks not yet submitted; they count anyway if the question
+        # closes first (see _submit_drafts)
+        self.drafts: dict[str, list] = {}
         self.all_answered = asyncio.Event()
         self.started = False
         self.task = None
@@ -269,19 +295,60 @@ class Room:
         return sum(1 for p in self.players.values() if p.ws)
 
     # ---------- answering ----------
+    def _clean_answer(self, opt, allow_empty=False):
+        """`opt` arrives straight off the wire. Returns it as this question
+        stores it (an index, or a sorted list of them on a select-all question)
+        or None when it is not a real answer. Rejected here rather than
+        downstream: an ungraded question has correct=None, and a null answer
+        must never be able to match it and score."""
+        q = self.questions[self.q_index]
+        n = len(q["options"])
+
+        def ok(i):
+            return isinstance(i, int) and not isinstance(i, bool) and 0 <= i < n
+        if not q.get("multi"):
+            return opt if ok(opt) else None
+        if not isinstance(opt, list) or not all(ok(i) for i in opt):
+            return None
+        opt = sorted(set(opt))
+        return opt if opt or allow_empty else None
+
+    def record_pick(self, email, opt):
+        """A tick or untick on a select-all question, before Submit. Held as a
+        draft so a question closing on someone who ticked but never pressed
+        Submit still counts what they ticked."""
+        if self.state != "question" or email in self.responses or email not in self.players:
+            return
+        if not self.questions[self.q_index].get("multi"):
+            return
+        opt = self._clean_answer(opt, allow_empty=True)
+        if opt is None:
+            return
+        if opt:
+            self.drafts[email] = opt
+        else:
+            self.drafts.pop(email, None)
+
+    def _submit_drafts(self):
+        """The question just closed: whatever was ticked and never submitted
+        goes in as the slowest possible answer, at the end of the clock or at the
+        host's close on an open question."""
+        late = self.answer_len if self.timed else max(0.0, time.time() - self.q_start)
+        for email, opt in self.drafts.items():
+            if email not in self.responses and email in self.players:
+                self.responses[email] = (opt, late)
+        self.drafts = {}
+
     def record_answer(self, email, opt):
         if self.state != "question" or email in self.responses:
             return
         p = self.players.get(email)
         if p is None:
             return
-        # `opt` arrives straight off the wire. Reject anything that is not a real
-        # option index here rather than downstream: an ungraded question has
-        # correct=None, and a null answer would otherwise satisfy `opt == correct`
-        # and score full marks.
-        if not isinstance(opt, int) or isinstance(opt, bool) or not (
-                0 <= opt < len(self.questions[self.q_index]["options"])):
+        opt = self._clean_answer(opt)
+        if opt is None:
             return
+        self.drafts.pop(email, None)
         t = max(0.0, time.time() - self.q_start)
         # an open question has no window to clamp against — it runs until the host
         # closes it, and relative scoring measures the spread rather than a ceiling
@@ -342,6 +409,8 @@ class Room:
                "total": len(self.questions), "text": q["text"],
                "phase": "reading" if reading else "answering",
                "code": q.get("code"), "image": q.get("image")}
+        if q.get("multi"):
+            msg["multi"] = True     # "Select all that apply": ticks and a Submit
         if reading or self.timed:
             # seconds left at send time, not an absolute stamp — the client
             # counts down locally so its clock never has to match ours
@@ -415,6 +484,8 @@ class Room:
             msg = self.question_msg()
             if player.email in self.responses:
                 msg = {**msg, "your_answer": self.responses[player.email][0]}
+            elif player.email in self.drafts:
+                msg = {**msg, "your_picks": self.drafts[player.email]}
             return msg
         if self.state == "results":
             # mid-leaderboard, a refresh must come back to the leaderboard rather
@@ -486,6 +557,7 @@ class Room:
             for i, q in enumerate(self.questions):
                 self.q_index = i
                 self.responses = {}
+                self.drafts = {}
                 self.board_shown = False
                 self.all_answered = asyncio.Event()
                 self.read_len, self.answer_len = split_timer(q["timer"], self.read_secs)
@@ -531,6 +603,7 @@ class Room:
                     # a harmless no-op and needs no guard.
                     await self._await_host()
                 self.advance.clear()   # arm the results gate before _reveal opens it
+                self._submit_drafts()  # no await between this and _reveal's state flip
                 await self._reveal(i, q)
                 await self._await_host()
 
@@ -626,7 +699,7 @@ class Room:
         # the answer indexes it was built with, and reading gradedness off the
         # question alone would ship that key to every phone in a room that was
         # told it has no right answer
-        graded = self.mode["grading"] == "graded" and q.get("correct") is not None
+        graded = self.mode["grading"] == "graded" and answer_key(q) is not None
         score = self._scorer()
         tally = tally_of(self.responses, len(q["options"]))
         for email, p in self.players.items():
@@ -636,7 +709,7 @@ class Room:
                                   "correct": False, "points": 0})
                 continue
             opt, t = resp
-            correct = graded and opt == q["correct"]
+            correct = graded and is_right(q, opt)
             pts = score(correct, t)
             p.score += pts
             p.total_time += t
@@ -648,6 +721,8 @@ class Room:
         rank_of = dense_ranks(ranking)   # tied scores share a rank, so do their deltas
         self.last_ranks = rank_of
         base = {"type": "results", "index": i, "tally": tally,
+                "answered": len(self.responses),
+                **({"multi": True} if q.get("multi") else {}),
                 "options": q["options"],
                 "code": q.get("code"), "image": q.get("image"),
                 "total_players": len(self.players),
@@ -656,6 +731,9 @@ class Room:
         # the clients draw what they are given, and know nothing about the mode
         if graded and self.mode["reveal"]:
             base["correct"] = q["correct"]
+            # people fully right. On a select-all question that is not any one
+            # option's count, so the console cannot work it out from the tally
+            base["got_it"] = sum(1 for o, _ in self.responses.values() if is_right(q, o))
         if self.mode["grading"] == "livepoll":
             # so a console that reconnects into this screen still draws the poll
             # columns rather than falling back to the graded bars
@@ -790,9 +868,10 @@ def build_csv(room):
         row = [p.name, p.score]
         for i in range(nq):
             a = p.answers[i] if i < len(p.answers) else None
-            opt = a["option"] if a else None
-            if a and isinstance(opt, int) and 0 <= opt < len(room.questions[i]["options"]):
-                row += [room.questions[i]["options"][opt],
+            opts = room.questions[i]["options"]
+            picks = picks_of(a["option"]) if a else []
+            if picks and all(isinstance(j, int) and 0 <= j < len(opts) for j in picks):
+                row += [" + ".join(opts[j] for j in picks),
                         1 if a["correct"] else 0, a["time"]]
             elif a and a.get("absent"):
                 row += ["", "", ""]      # had not joined yet — not the same as a blank
