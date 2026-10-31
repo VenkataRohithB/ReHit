@@ -260,7 +260,7 @@ async def run_one_question(token, mode, answers, timer=None, qkw=None):
 
     await asyncio.gather(*(answer(s, o, d) for s, o, d in answers))
     hm, *pm = await collect([h, *ps.values()], 2.5)
-    if mode.get("timing") == "open" or mode.get("grading") == "livepoll":
+    if mode.get("timing") == "open" or mode.get("grading") in ("livepoll", "average"):
         await h.send(json.dumps({"type": "next"}))
         more = await collect([h, *ps.values()], 2.5)
         hm += more[0]
@@ -433,6 +433,22 @@ async def check_live_poll(token):
     ok("live poll: tally on the console only, never on a phone")
 
 
+async def check_live_average(token):
+    seats = [("a@x.edu", 3, 0.0), ("b@x.edu", 8, 0.2), ("c@x.edu", 99, 0.4)]
+    h, ps, hm, pm = await run_one_question(
+        token, {"grading": "average"}, seats, qkw={"min": 1, "max": 10})
+    prog = [m for m in only(hm, "progress") if "spread" in m]
+    assert prog, "the console never got a live average"
+    # 99 is out of range, so only 3 and 8 count
+    assert prog[-1]["spread"] == {"count": 2, "average": 5.5, "median": 5.5}, prog[-1]
+    for seat, msgs in pm.items():
+        leaked = [m for m in msgs if "spread" in m and m.get("type") != "results"]
+        assert not leaked, f"{seat} saw the running average: {leaked[:1]}"
+        assert last(msgs, "results")["spread"]["average"] == 5.5
+    await shut(h, *ps.values())
+    ok("live average: range enforced, mean on the console until it closes")
+
+
 async def check_game_over_and_csv(token):
     code, title = make_quiz(token, [q(timer=READ + 3)], mode={"scoring": "flat"})
     h = await host_sock(code, token)
@@ -520,6 +536,7 @@ async def main():
     await check_waiting_gate(token)
     await check_leaderboard_is_the_hosts_to_reveal(token)
     await check_live_poll(token)
+    await check_live_average(token)
     await check_scoring_modes(token)
     await check_reveal_and_board(token)
     await check_tie_ranks(token)

@@ -60,6 +60,7 @@ def build_report(room):
     nq = len(room.questions)
     graded = room.mode["grading"] == "graded"
     scored = room.mode["scoring"] != "none"
+    numeric = room.mode["grading"] == "average"   # answers are numbers, not options
 
     def answer_of(p, i):
         return p.answers[i] if i < len(p.answers) else None
@@ -75,7 +76,8 @@ def build_report(room):
         skipped = [p for p, a in rows if _status(a) == "skipped"]
         absent = [p for p, a in rows if _status(a) == "absent"]
         counts = [0] * len(opts)
-        for _, a in answered:
+        values = [a["option"] for _, a in answered] if numeric else []
+        for _, a in ([] if numeric else answered):
             for j in picks_of(a["option"]):
                 counts[j] += 1
         times = [a["time"] for _, a in answered if a.get("time") is not None]
@@ -99,6 +101,7 @@ def build_report(room):
             "timer_seconds": q.get("timer"),
             "code": q.get("code"),
             "image": q.get("image"),
+            "range": [q["min"], q["max"]] if numeric else None,
             "correct_option": _letters(key_picks),
             "correct_answer": _texts(opts, key_picks),
             "options": [{
@@ -119,6 +122,8 @@ def build_report(room):
                 "slowest_seconds": round(max(times), 2) if times else None,
                 "difficulty": _band(pct_correct),
                 "top_distractor": distractor,
+                "average": round(statistics.fmean(values), 2) if values else None,
+                "median": statistics.median(values) if values else None,
             },
         })
 
@@ -129,12 +134,14 @@ def build_report(room):
         for i, q in enumerate(room.questions):
             a = answer_of(p, i)
             st = _status(a)
-            picks = picks_of(a["option"]) if st == "answered" else []
+            # a live average's answer is the number typed, with no letter
+            picks = picks_of(a["option"]) if st == "answered" and not numeric else []
             responses.append({
                 "question_number": i + 1,
                 "status": st,
                 "option": _letters(picks),
-                "answer": _texts(q["options"], picks),
+                "answer": (a["option"] if st == "answered" else None) if numeric
+                else _texts(q["options"], picks),
                 "is_correct": bool(a.get("correct")) if st == "answered" and graded else None,
                 "points": a.get("points") if st == "answered" else 0,
                 "seconds": a.get("time") if st == "answered" else None,
@@ -261,6 +268,7 @@ def questions_csv(report):
     w.writerow(["question_number", "question", "correct_option", "correct_answer",
                 "answered", "skipped", "absent", "correct", "percent_correct",
                 "difficulty", "average_seconds", "top_distractor",
+                "average_answer", "median_answer",
                 *[f"count_{k}" for k in keys]])
     for q in report["questions"]:
         s = q["stats"]
@@ -270,6 +278,7 @@ def questions_csv(report):
             s["answered"], s["skipped"], s["absent"], s["correct"],
             s["percent_correct"], s["difficulty"], s["average_seconds"],
             (s["top_distractor"] or {}).get("text", ""),
+            s["average"], s["median"],
             *[counts.get(k, "") for k in keys],
         ]])
     return buf.getvalue()

@@ -68,15 +68,17 @@ refused — last device in wins.
 
 ## How a quiz runs — six switches
 
-Under the quiz name in the builder is one line describing how this quiz behaves,
-and a **Change** link. There are no modes, only six independent switches; a
-"feedback poll" is just several of them set together. The default of every one is
+Under the quiz name is **How this quiz runs**: first the kind of quiz — graded,
+poll, live poll or live average — as four cards, then the switches that kind
+leaves open (the rest drop out of view), and the room capacity. A saved quiz opens
+with this collapsed to one line. Under the hood there are no modes, only six
+independent switches; the kind of quiz is the "Answers are" switch. The default of every one is
 what the app has always done, so ignoring this entirely changes nothing.
 
 | Switch | Options |
 |---|---|
 | **Players join by** | their email · a name they choose · nothing (anonymous) |
-| **Answers are** | graded · a poll, with no right answer |
+| **Answers are** | graded · a poll, with no right answer · a live poll · a live average |
 | **Each question** | runs on its timer · stays open until you close it |
 | **Points** | faster is worth more · faster than the rest of the room · flat · none |
 | **After each one** | show the correct answer · keep it hidden |
@@ -86,6 +88,13 @@ Three of these settle themselves, because the alternative is meaningless: a poll
 has nothing to score, no scoring has nothing to rank, and a question with no clock
 cannot measure absolute speed (it uses *faster than the room* instead). Switches
 that cannot matter grey out rather than vanish.
+
+**Live average** asks each question with a range instead of options — say *0 to
+12* — and every student types a whole number in it (both ends allowed; the server
+refuses anything else). The projector shows the running average and where it sits
+in the range; phones see only their own answer until you close the question, so
+nobody anchors on the crowd. Closing it shows the average and the median to
+everyone, and the reports carry each student's number.
 
 **Joining by name** requires it to be unused in that room — a clash is refused so
 you never get two people called "Priya" in one export. Refreshing still returns

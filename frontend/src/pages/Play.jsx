@@ -5,7 +5,7 @@ import { useSocket } from '../lib/useSocket.js'
 import { asList, sameAnswer, answerText } from '../lib/question.js'
 import {
   Screen, Button, TimerBar, OptionKey, Leaderboard, QuestionMedia, Ticker, faceOf, clock,
-  tone, useCountdown, useStopwatch, Logo, QuizTagline,
+  tone, useCountdown, useStopwatch, Logo, QuizTagline, avgText,
 } from '../ui.jsx'
 
 /* Stable per-device id, shared across every room. It identifies a seat to the
@@ -42,6 +42,8 @@ export default function Play() {
   // ticks still count if the clock runs out before Submit is pressed
   const [ticks, setTicks] = useState([])
   const onIndex = useRef(null)                   // which question the ticks belong to
+  const [typedNum, setTypedNum] = useState('')   // a live-average answer, before it is sent
+  const [numErr, setNumErr] = useState('')
 
   const onMsg = useCallback((m) => {
     switch (m.type) {
@@ -61,7 +63,8 @@ export default function Play() {
         break
       case 'question':
         // your_answer is present when we refreshed after already answering
-        setPicked(m.your_answer ?? null); setPending(null)
+        setPicked(m.your_answer ?? null); setPending(null); setNumErr('')
+        if (m.phase === 'reading') setTypedNum('')
         // the server's copy wins on a resume; otherwise keep ticks within the
         // same question (reading -> answering) and clear them for a new one
         setTicks((t) => m.your_picks ?? (onIndex.current === m.index ? t : []))
@@ -136,6 +139,20 @@ export default function Play() {
     if (status !== 'open' || !multi || picked != null || pending != null || !ticks.length) return
     if (isQuestion && !reading) send({ type: 'pick', option: ticks })
   }, [status, multi, picked, pending, isQuestion, reading, view.index])
+
+  // the server enforces the range as well — this only saves a round trip and
+  // says what was wrong, since an out-of-range answer is otherwise just ignored
+  const submitNumber = (e) => {
+    e.preventDefault()
+    const [lo, hi] = view.range
+    const n = Number(typedNum)
+    if (!typedNum.trim() || !Number.isInteger(n) || n < lo || n > hi) {
+      setNumErr(`Enter a whole number from ${lo} to ${hi}`)
+      return
+    }
+    setNumErr('')
+    answer(n)
+  }
 
   // Reconnected with an undelivered answer and the question is still open — send it.
   useEffect(() => {
@@ -237,7 +254,30 @@ export default function Play() {
             tracking-tight text-balance">{view.text}</h2>
           {multi && <p className="-mt-1 flex-none font-semibold text-anchor">Select all that apply</p>}
           <QuestionMedia code={view.code} image={view.image} />
-          <div className="flex flex-1 flex-col justify-center gap-3">
+          {view.range ? (
+            <form onSubmit={submitNumber} noValidate className="flex flex-1 flex-col justify-center gap-3">
+              <input type="number" step="1" min={view.range[0]} max={view.range[1]} autoFocus
+                // Android's numeric pad has no minus key
+                inputMode={view.range[0] < 0 ? 'text' : 'numeric'}
+                value={picked ?? typedNum} disabled={picked != null}
+                onChange={(e) => { setTypedNum(e.target.value); setNumErr('') }}
+                aria-label={`Your answer, from ${view.range[0]} to ${view.range[1]}`}
+                placeholder={`${view.range[0]}–${view.range[1]}`}
+                className="w-full rounded-3xl border-2 border-line bg-canvas px-5 py-5 text-center
+                  text-[clamp(2rem,12vw,3.5rem)] font-extrabold tabular-nums outline-none
+                  placeholder:text-muted/40 focus:border-anchor disabled:bg-track" />
+              {numErr
+                ? <p role="alert" className="text-center font-semibold text-rose-ink">{numErr}</p>
+                : <p className="text-center text-sm text-muted">
+                    A whole number from {view.range[0]} to {view.range[1]}
+                  </p>}
+              {picked == null && <Button type="submit" className="py-4 text-lg">Submit</Button>}
+            </form>
+          ) : (
+          /* bottom of the screen, where the thumb already is — the question keeps
+             the top to itself */
+          <>
+          <div className="flex flex-1 flex-col justify-end gap-3">
             {view.options.map((opt, i) => {
               const t = tone(i)
               // a select-all question shows its ticks; a single one its tap
@@ -267,6 +307,8 @@ export default function Play() {
               Submit
             </Button>
           )}
+          </>
+          )}
           {/* never leave live-looking tiles up after the clock runs out, and never
               claim "locked in" for an answer the server has not acknowledged */}
           <p className={`flex-none text-center text-sm font-semibold
@@ -276,43 +318,93 @@ export default function Play() {
                 : timeUp ? (multi && picked == null && ticks.length
                   ? "Time's up — your ticks count, results coming…" : "Time's up — results coming…")
                   : picked != null ? 'Locked in — waiting for the others…'
-                    : !multi ? 'Tap your answer'
-                      : ticks.length ? 'Press Submit to lock it in' : 'Tick every answer that applies'}
+                    : view.range ? 'Type a number and submit'
+                      : !multi ? 'Tap your answer'
+                        : ticks.length ? 'Press Submit to lock it in' : 'Tick every answer that applies'}
           </p>
         </>
       )}
 
-      {view.screen === 'results' && (
-        <>
-          {/* the big slot carries points when there are points, and the verdict
-              when there are not. A poll has neither, so it just confirms the tap. */}
-          <div className="flex flex-none flex-col items-center gap-1 py-4">
-            <div className={`anim-pop text-[clamp(2.6rem,16vw,5rem)] font-extrabold tracking-tight
-              ${view.gained > 0 ? 'text-mint-ink' : 'text-muted'}`}>
-              {scored ? <>+<Ticker to={view.gained} ms={800} /></>
-                : view.correct != null ? (sameAnswer(mine, view.correct) ? 'Correct' : 'Not this time')
-                  : 'Answered'}
+      {view.screen === 'results' && (() => {
+        const graded = view.correct != null
+        const right = graded && (scored ? view.gained > 0 : sameAnswer(mine, view.correct))
+        const move = view.your_move ?? 0
+        return (
+          <>
+            <div className="flex flex-1 flex-col justify-center gap-4">
+              <div className="flex flex-col items-center gap-1">
+                {graded && (
+                  <span className={`text-lg font-extrabold ${right ? 'text-mint-ink' : 'text-rose-ink'}`}>
+                    {right ? 'Correct!' : 'Not this time'}
+                  </span>
+                )}
+                {/* points when there are points, the class average on a live
+                    average, and a plain confirmation on a poll */}
+                <div className={`anim-pop text-[clamp(2.6rem,18vw,5.5rem)] font-extrabold leading-none
+                  tracking-tight tabular-nums ${view.spread ? 'text-ink'
+                    : view.gained > 0 ? 'text-mint-ink' : 'text-muted'}`}>
+                  {view.spread ? avgText(view.spread.average)
+                    : scored ? <>+<Ticker to={view.gained} ms={800} /></>
+                      : 'Answered'}
+                </div>
+                {view.spread && (
+                  <p className="font-semibold text-muted">
+                    Class average{picked != null && <> · you said {picked}</>}
+                  </p>
+                )}
+              </div>
+
+              {/* the right answer in its own colour, so it matches the projector —
+                  one card per option on a select-all question */}
+              {graded && asList(view.correct).map((i) => {
+                const t = tone(i)
+                return (
+                  <div key={i} className={`flex items-center gap-3 rounded-3xl px-4 py-4 text-lg
+                    font-extrabold ${t.fill} ${t.ink}`}>
+                    <OptionKey>{t.key}</OptionKey>
+                    <span className="min-w-0 flex-1">{view.options[i]}</span>✓
+                  </div>
+                )
+              })}
+              {graded && !right && mine != null && (
+                <p className="text-center font-semibold text-muted">
+                  You picked · {answerText(view.options, mine)}
+                </p>
+              )}
+              {!graded && !view.spread && (
+                <p className="text-center font-semibold text-muted">
+                  {mine != null ? <>You picked · {answerText(view.options, mine)}</> : 'Answer recorded'}
+                </p>
+              )}
+
+              {scored && view.your_rank != null && (
+                <div className="grid grid-cols-2 gap-3 text-center">
+                  <div className="rounded-3xl bg-track px-3 py-4">
+                    <b className="block text-4xl font-extrabold tabular-nums">#{view.your_rank}</b>
+                    <span className="text-sm font-semibold text-muted">of {view.total_players} players</span>
+                  </div>
+                  <div className="rounded-3xl bg-track px-3 py-4">
+                    <b className={`block text-4xl font-extrabold tabular-nums
+                      ${move > 0 ? 'text-mint-ink' : move < 0 ? 'text-rose-ink' : 'text-muted'}`}>
+                      {move > 0 ? `▲ ${move}` : move < 0 ? `▼ ${-move}` : '–'}
+                    </b>
+                    <span className="text-sm font-semibold text-muted">
+                      {move > 0 ? `place${move === 1 ? '' : 's'} up` : move < 0
+                        ? `place${move === -1 ? '' : 's'} down` : 'no change'}
+                    </span>
+                  </div>
+                </div>
+              )}
+              {view.leaderboard?.length > 0 &&
+                <Leaderboard rows={view.leaderboard.slice(0, 5)} meName={myName} compact />}
             </div>
-            <p className="font-semibold text-muted">
-              {view.correct != null
-                ? <>{(scored ? view.gained > 0 : sameAnswer(mine, view.correct)) ? 'Correct' : 'Not this time'}
-                  {' · '}{answerText(view.options, view.correct)}</>
-                : mine != null ? <>You picked · {answerText(view.options, mine)}</> : 'Answer recorded'}
+            <p className="flex-none text-center text-sm font-semibold text-muted">
+              {scored && <span className="tabular-nums">{view.your_score} pts · </span>}
+              {view.last ? 'Waiting for the final results…' : 'Waiting for the host to continue…'}
             </p>
-          </div>
-          {view.leaderboard?.length > 0 &&
-            <Leaderboard rows={view.leaderboard.slice(0, 5)} meName={myName} compact />}
-          <p className="flex-none text-center text-sm font-semibold text-muted">
-            {view.last ? 'Waiting for the final results…' : 'Waiting for the host to continue…'}
-          </p>
-          {scored && (
-            <div className="flex flex-none items-center justify-between font-semibold text-muted">
-              {view.your_rank != null && <span>You're #{view.your_rank}</span>}
-              <span className="ml-auto tabular-nums">{view.your_score} pts</span>
-            </div>
-          )}
-        </>
-      )}
+          </>
+        )
+      })()}
 
       {view.screen === 'over' && (
         <>
