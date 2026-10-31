@@ -55,7 +55,13 @@ print(xs[-1])
 Which data structure gives O(1) average lookup? [15]
 - Linked list
 * Hash map
-- Binary search tree`
+- Binary search tree
+
+Which of these are prime numbers? [25]
+* 2
+* 3
+- 9
+* 11`
 
 const OPTION_RE = /^\s*([-*])\s*(.+?)\s*$/
 const TIMER_RE = /\s*\[(\d+)\s*s?\]\s*$/i

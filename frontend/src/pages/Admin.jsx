@@ -388,7 +388,9 @@ function BulkImport({ existing, graded, onLoad, onClose }) {
 
       <p className="mb-3 text-sm text-muted">
         One question per block. Options start with <code className="rounded bg-track px-1">-</code>,
-        and <code className="rounded bg-track px-1">*</code> marks the correct one.
+        and <code className="rounded bg-track px-1">*</code> marks the correct one. Mark more than
+        one <code className="rounded bg-track px-1">*</code> and it becomes a
+        &ldquo;select all that apply&rdquo; question.
         Add <code className="rounded bg-track px-1">[20]</code> after a question to set its timer.
         JSON works too.
       </p>

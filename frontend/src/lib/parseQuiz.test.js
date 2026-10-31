@@ -7,7 +7,7 @@ import { parseQuiz, formatQuiz, EXAMPLE, DEFAULT_TIMER } from './parseQuiz.js'
 test('parses the documented example', () => {
   const { questions, errors } = parseQuiz(EXAMPLE)
   assert.deepEqual(errors, [])
-  assert.equal(questions.length, 3)
+  assert.equal(questions.length, 4)
   assert.deepEqual(questions[0], {
     text: 'Which sorting algorithm has O(n log n) worst case?',
     options: ['Merge sort', 'Quick sort', 'Bubble sort', 'Insertion sort'],
@@ -18,6 +18,8 @@ test('parses the documented example', () => {
   assert.equal(questions[1].correct, 0)
   assert.equal(questions[2].correct, 1, 'correct index follows the * marker, not position')
   assert.equal(questions[2].timer, 15)
+  assert.deepEqual(questions[3].correct, [0, 1, 3], 'several * make a select-all question')
+  assert.equal(questions[3].multi, true)
 })
 
 test('code lines that look like options are kept as code', () => {
