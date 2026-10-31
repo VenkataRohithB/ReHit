@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { Fragment, useCallback, useEffect, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import QRCode from 'qrcode'
 import {
@@ -11,7 +11,7 @@ import { mergeQuestion, isTimed, asList, answerText } from '../lib/question.js'
 import { useSocket } from '../lib/useSocket.js'
 import {
   Screen, JoinStrip, Button, TimerRing, OptionKey, ResultBars, RaceBoard,
-  WinnerFinale, LobbyPills, QuestionMedia, PollColumns, tone, useStopwatch, clock, Logo, QuizTagline, DartLoader,
+  WinnerFinale, LobbyPills, QuestionMedia, PollColumns, AverageMeter, tone, useStopwatch, clock, Logo, QuizTagline, DartLoader,
 } from '../ui.jsx'
 
 const TOKEN_KEY = 'quiz.token'
@@ -22,57 +22,83 @@ const READ_KEY = 'quiz.read'   // seconds of reading time, for the builder hint
    the server, so a reload, a new tab, or a server restart all keep you logged in.
    The room you are hosting is in the URL (/admin/quiz/<code>), so a reload lands
    back on it and `/` is always the dashboard. */
-const blankQ = () => ({ text: '', timer: 20, options: ['', ''], correct: 0 })
+const blankQ = () => ({ text: '', timer: 20, options: ['', ''], correct: 0, min: '1', max: '10' })
 const todayName = () =>
   `Quiz — ${new Date().toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}`
-/* The six per-quiz switches. First value of each is what the app has always done,
+/* The per-quiz switches. First value of each is what the app has always done,
    so a quiz built without touching any of this behaves exactly as before. */
 const DEFAULT_MODE = {
   identity: 'email', grading: 'graded', scoring: 'absolute',
   reveal: true, board: 'always', timing: 'countdown',
 }
+/* What kind of quiz this is — the `grading` switch, promoted to the first choice
+   because it decides which of the rest still mean anything. */
+const TYPES = [
+  ['graded', 'Graded quiz', 'One right answer. Points and a leaderboard.'],
+  ['feedback', 'Poll', 'No right answer. Results after each question.'],
+  ['livepoll', 'Live poll', 'Bars fill on the screen as the room votes.'],
+  ['average', 'Live average', 'Everyone types a number. The screen shows the average.'],
+]
 const SWITCHES = [
-  ['identity', 'Players join by', [['email', 'Their email'], ['name', 'A name they choose'],
-    ['anonymous', 'Nothing — anonymous']]],
-  ['grading', 'Answers are', [['graded', 'Graded — one is correct'],
-    ['feedback', 'A poll — no right answer'],
-    ['livepoll', 'A live poll — bars fill as they answer']]],
+  ['identity', 'Players join with', [['email', 'Email'], ['name', 'A name'],
+    ['anonymous', 'Nothing']]],
   ['timing', 'Each question', [['countdown', 'Runs on its timer'],
-    ['open', 'Stays open until I close it']]],
-  ['scoring', 'Points', [['absolute', 'Faster is worth more'],
-    ['relative', 'Faster than the rest of the room'],
-    ['flat', 'The same for every correct answer'], ['none', 'No points — just right or wrong']]],
-  ['reveal', 'After each one', [[true, 'Show the correct answer'],
-    [false, 'Keep the answer hidden']]],
-  ['board', 'Leaderboard', [['always', 'After every question'], ['end', 'Only at the end'],
+    ['open', 'Stays open till I close it']]],
+  ['scoring', 'Points', [['absolute', 'Faster earns more'],
+    ['relative', 'Beat the room'], ['flat', 'Flat'], ['none', 'None']]],
+  ['reveal', 'Correct answer', [[true, 'Show it'], [false, 'Keep it hidden']]],
+  ['board', 'Leaderboard', [['always', 'Every question'], ['end', 'Only at the end'],
     ['never', 'Never']]],
 ]
-/* Faithful port of clean_mode (backend/app/game.py): the same three dependency
-   rules, in the same order. The server re-applies them on save and again when the
-   room is built — this is display only, so the builder shows the quiz that will
-   actually run rather than the buttons that were clicked. Without it a poll still
-   reads "Faster is worth more", and an open question still claims absolute speed. */
+/* Faithful port of clean_mode (backend/app/game.py): the same dependency rules, in
+   the same order. The server re-applies them on save and again when the room is
+   built — this is display only, so the builder shows the quiz that will actually
+   run rather than the buttons that were clicked. */
 const settle = (m) => {
   const out = { ...m }
-  if (out.grading === 'feedback' || out.grading === 'livepoll') out.scoring = 'none'
-  // a live poll is closed by the host, never by a clock
-  if (out.grading === 'livepoll') out.timing = 'open'
+  if (out.grading !== 'graded') out.scoring = 'none'
+  // a live poll or average is closed by the host, never by a clock
+  if (out.grading === 'livepoll' || out.grading === 'average') out.timing = 'open'
   if (out.scoring === 'none') out.board = 'never'
   if (out.timing === 'open' && out.scoring === 'absolute') out.scoring = 'relative'
   return out
 }
 
-/* A switch that cannot matter is greyed out rather than hidden, so nothing
-   silently disappears while you are reading. */
-const switchOff = (m) => ({
+/* Rows the chosen type has already decided. Hidden rather than greyed: with the
+   type picked first, a poll with no "Points" row explains itself. */
+const settled = (m) => ({
   scoring: m.grading !== 'graded',
   reveal: m.grading !== 'graded',
-  timing: m.grading === 'livepoll',   // the host closes a live poll
+  timing: m.grading === 'livepoll' || m.grading === 'average',
   board: m.grading !== 'graded' || m.scoring === 'none',
 })
-const summarise = (m) => SWITCHES
-  .map(([k, , opts]) => (opts.find(([v]) => v === m[k]) || [])[1])
-  .filter(Boolean).join(' · ')
+const summarise = (m, capacity) => {
+  const off = settled(m)
+  return [TYPES.find(([v]) => v === m.grading)?.[1],
+    ...SWITCHES.filter(([k]) => !off[k])
+      .map(([k, label, opts]) => `${label.toLowerCase()} ${
+        (opts.find(([v]) => v === m[k]) || [])[1]?.toLowerCase()}`),
+    `up to ${capacity} players`].filter(Boolean).join(' · ')
+}
+
+/* A row of connected choices — one decision, every option visible at once. */
+function Segmented({ label, options, value, onChange }) {
+  return (
+    <div role="group" aria-label={label}
+      className="flex w-fit max-w-full flex-wrap gap-1 rounded-xl bg-track p-1">
+      {options.map(([v, text]) => {
+        const on = v === value
+        return (
+          <button key={String(v)} type="button" aria-pressed={on} onClick={() => onChange(v)}
+            className={`rounded-lg px-3 py-1.5 text-sm font-semibold transition
+              ${on ? 'bg-canvas text-ink shadow-sm ring-1 ring-line' : 'text-muted hover:text-ink'}`}>
+            {text}
+          </button>
+        )
+      })}
+    </div>
+  )
+}
 
 const blankQuiz = () => ({ title: todayName(), capacity: 60, questions: [blankQ()], mode: {} })
 
@@ -159,6 +185,14 @@ function Login({ onToken }) {
 }
 
 /* ============================ dashboard ============================ */
+/* quiz type → [value, label, chip colours]; the same four as the builder's cards */
+const KIND = {
+  graded: ['graded', 'Graded', 'bg-peri text-peri-ink'],
+  feedback: ['feedback', 'Poll', 'bg-butter text-butter-ink'],
+  livepoll: ['livepoll', 'Live poll', 'bg-mint text-mint-ink'],
+  average: ['average', 'Live average', 'bg-lilac text-lilac-ink'],
+}
+
 const when = (t) => {
   if (!t) return '—'
   const d = new Date(t * 1000)
@@ -211,6 +245,21 @@ function Dashboard({ token, onNew, onEdit: openInBuilder, onOpen, onAuthFail }) 
   const [err, setErr] = useState('')
   const [busy, setBusy] = useState(null)
   const [menu, setMenu] = useState(null)
+  const [tab, setTab] = useState('quizzes')
+  const [q, setQ] = useState('')
+
+  // a row without a quiz_id is a game whose quiz was deleted — it lives on under
+  // Past games, which reads every finished game straight from history
+  const quizzes = (data?.rows || []).filter((r) => r.quiz_id != null)
+  const games = data?.games || []
+  const needle = q.trim().toLowerCase()
+  const match = (r) => !needle || r.title.toLowerCase().includes(needle)
+  const foundQuizzes = quizzes.filter(match)
+  const foundGames = games.filter(match)
+  // one page each, so a long history never turns into an endless scroll; a new
+  // search or tab starts back at page 1
+  const [page, setPage] = useState({ quizzes: 0, games: 0 })
+  useEffect(() => setPage({ quizzes: 0, games: 0 }), [q])
 
   // any click outside a menu closes it
   useEffect(() => {
@@ -244,23 +293,63 @@ function Dashboard({ token, onNew, onEdit: openInBuilder, onOpen, onAuthFail }) 
     } catch (e) { fail(e) }
   }
 
-  return (
-    <div className="mx-auto max-w-4xl p-6">
-      <div className="mb-8 flex flex-wrap items-center justify-between gap-3">
-        <h1 className="text-3xl"><Logo to="/" /></h1>
-        <div className="flex items-center gap-3">
-          <Button onClick={onNew}>New quiz</Button>
-          <button onClick={onAuthFail}
-            className="rounded-xl px-3 py-2 text-sm font-semibold text-muted hover:text-ink">
-            Log out
-          </button>
+  const gameTable = (rows) => (
+    <div className="overflow-x-auto">
+      <div className="min-w-[34rem]">
+        <div className={`${GAME_COLS} border-b border-line px-3 pb-2 text-xs font-extrabold
+          uppercase tracking-[.08em] text-muted`}>
+          <span>Game</span><span>Players</span><span>Class avg</span><span>Got it right</span><span />
         </div>
+        {rows.map((g) => (
+          <div key={g.code} className={`${GAME_COLS} border-b border-line px-3 py-3`}>
+            <span className="min-w-0">
+              <b className="block truncate font-extrabold">{g.title}</b>
+              <span className="text-sm font-semibold text-muted">
+                {when(g.ended)}
+                {g.winner && <> · 🏆 {(g.winner.name || '?').split('@')[0]}</>}
+              </span>
+            </span>
+            <span className="font-semibold tabular-nums">{g.players}</span>
+            <span className="font-semibold tabular-nums">
+              {g.average_score != null ? Math.round(g.average_score).toLocaleString() : '—'}
+            </span>
+            {/* only a graded game has a right answer to measure */}
+            {g.accuracy != null ? (
+              <span className="h-2 overflow-hidden rounded-full bg-track"
+                title={`${Math.round(g.accuracy)}% correct`}>
+                <span className="block h-full rounded-full bg-mint-ink" style={{ width: `${g.accuracy}%` }} />
+              </span>
+            ) : <span className="text-muted">—</span>}
+            <span onClick={(e) => e.stopPropagation()}>
+              <RowMenu row={{ ...g, quiz_id: null }} open={menu === g.code}
+                onToggle={() => setMenu((m) => (m === g.code ? null : g.code))}
+                onCsv={(kind) => grab(g.code, kind)} />
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+
+  return (
+    <div className="mx-auto max-w-5xl p-6">
+      <div className="mb-6 flex flex-wrap items-center gap-3">
+        <h1 className="mr-auto text-3xl"><Logo to="/" /></h1>
+        <input type="search" value={q} onChange={(e) => setQ(e.target.value)}
+          placeholder="Search quizzes" aria-label="Search quizzes and games"
+          className="order-last w-full rounded-xl border-2 border-line px-3 py-2 text-sm outline-none
+            placeholder:text-muted/60 focus:border-anchor sm:order-none sm:w-64" />
+        <Button onClick={onNew}>New quiz</Button>
+        <button onClick={onAuthFail}
+          className="rounded-xl px-2 py-2 text-sm font-semibold text-muted hover:text-ink">
+          Log out
+        </button>
       </div>
 
       {err && <p role="alert" className="mb-4 font-semibold text-rose-ink">{err}</p>}
 
       {data?.live?.length > 0 && (
-        <section className="mb-8">
+        <section className="mb-6">
           <h2 className="mb-3 text-xs font-semibold uppercase tracking-[.1em] text-muted">
             Running now
           </h2>
@@ -281,9 +370,15 @@ function Dashboard({ token, onNew, onEdit: openInBuilder, onOpen, onAuthFail }) 
         </section>
       )}
 
-      <h2 className="mb-3 text-xs font-semibold uppercase tracking-[.1em] text-muted">
-        Recent quizzes
-      </h2>
+      <div role="tablist" className="mb-5 flex w-fit gap-1 rounded-xl bg-track p-1">
+        {[['quizzes', 'My quizzes', quizzes.length], ['games', 'Past games', games.length]].map(([k, label, n]) => (
+          <button key={k} role="tab" aria-selected={tab === k} onClick={() => setTab(k)}
+            className={`rounded-lg px-3.5 py-1.5 text-sm font-semibold transition
+              ${tab === k ? 'bg-canvas text-ink shadow-sm ring-1 ring-line' : 'text-muted hover:text-ink'}`}>
+            {label}{data && <span className="tabular-nums"> · {n}</span>}
+          </button>
+        ))}
+      </div>
 
       {!data && (
         <div className="flex flex-col items-center gap-4 py-16">
@@ -291,66 +386,128 @@ function Dashboard({ token, onNew, onEdit: openInBuilder, onOpen, onAuthFail }) 
           <p className="font-semibold text-muted">Loading your quizzes…</p>
         </div>
       )}
-      {data && !data.rows.length && (
-        <div className="rounded-2xl border border-dashed border-line px-8 py-12 text-center">
-          <p className="text-lg font-extrabold">No quizzes yet</p>
-          <p className="mx-auto mt-1.5 max-w-sm text-sm text-muted">
-            Build one and it stays here, ready to run again with a fresh room code
-            whenever you need it.
-          </p>
-          <Button onClick={onNew} className="mt-5">Build your first quiz</Button>
-        </div>
+
+      {data && tab === 'quizzes' && (
+        <>
+          {!quizzes.length ? (
+            <div className="rounded-2xl border border-dashed border-line px-8 py-12 text-center">
+              <p className="text-lg font-extrabold">No quizzes yet</p>
+              <p className="mx-auto mt-1.5 max-w-sm text-sm text-muted">
+                Build one and it stays here, ready to run again with a fresh room code
+                whenever you need it.
+              </p>
+              <Button onClick={onNew} className="mt-5">Build your first quiz</Button>
+            </div>
+          ) : !foundQuizzes.length ? (
+            <p className="py-10 text-center text-muted">No quiz matches “{q}”.</p>
+          ) : (
+            <>
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                {pageOf(foundQuizzes, page.quizzes, QUIZ_PAGE).map((row) => {
+                  const [, typeName, fill] = KIND[row.grading] || KIND.graded
+                  return (
+                    <div key={row.quiz_id}
+                      className="flex flex-col gap-2 rounded-2xl border border-line p-4 transition hover:shadow-sm">
+                      <div className="flex items-start justify-between gap-2">
+                        <span className={`rounded-full px-2.5 py-0.5 text-xs font-extrabold ${fill}`}>{typeName}</span>
+                        <span onClick={(e) => e.stopPropagation()}>
+                          <RowMenu row={row} open={menu === row.quiz_id}
+                            onRerun={() => rerun(row)}
+                            onToggle={() => setMenu((m) => (m === row.quiz_id ? null : row.quiz_id))}
+                            onEdit={() => edit(row)} onCsv={(kind) => grab(row.code, kind)}
+                            onDelete={() => remove(row)} />
+                        </span>
+                      </div>
+                      <b className="text-[1.05rem] font-extrabold leading-snug">{row.title}</b>
+                      <p className="text-sm font-semibold text-muted">
+                        {row.questions} question{row.questions === 1 ? '' : 's'} ·{' '}
+                        {row.code ? `last run ${day(row.last_run)}` : 'never run'}
+                      </p>
+                      <div className="mt-auto flex gap-2 pt-1">
+                        <button onClick={() => rerun(row)} disabled={!!busy}
+                          className="rounded-lg bg-anchor px-3.5 py-1.5 text-sm font-extrabold text-white
+                            hover:brightness-105 disabled:opacity-60">
+                          {busy === row.quiz_id ? 'Starting…' : 'Run'}
+                        </button>
+                        <button onClick={() => edit(row)}
+                          className="rounded-lg bg-track px-3.5 py-1.5 text-sm font-extrabold hover:brightness-95">
+                          Edit
+                        </button>
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+              <Pager page={page.quizzes} total={foundQuizzes.length} per={QUIZ_PAGE}
+                onPage={(n) => setPage((p) => ({ ...p, quizzes: n }))} />
+            </>
+          )}
+
+          {/* the latest few games under the quizzes, so how the last class went is
+              on the first screen; the full history is one click away */}
+          {foundGames.length > 0 && (
+            <section className="mt-8">
+              <div className="mb-2 flex items-baseline justify-between">
+                <h2 className="text-xs font-semibold uppercase tracking-[.1em] text-muted">Past games</h2>
+                {foundGames.length > PREVIEW && (
+                  <button onClick={() => setTab('games')}
+                    className="text-sm font-semibold text-anchor hover:underline">
+                    See all {foundGames.length} →
+                  </button>
+                )}
+              </div>
+              {gameTable(foundGames.slice(0, PREVIEW))}
+            </section>
+          )}
+        </>
       )}
 
-      {/* Title leads, everything about it sits underneath — the old single line
-          gave the name, the counts and the winner all the same weight, so a list
-          of ten quizzes read as one block of text. The whole row re-runs; the ⋯
-          keeps the rarer actions without competing for the click. */}
-      <div className="flex flex-col gap-2">
-        {data?.rows.map((row) => {
-          const id = row.quiz_id ?? row.code
-          const canRun = row.quiz_id != null
-          return (
-            <div key={id}
-              onClick={canRun && !busy ? () => rerun(row) : undefined}
-              className={`group flex items-center gap-4 rounded-2xl border border-transparent
-                bg-track px-4 py-3.5 transition
-                ${canRun ? 'cursor-pointer hover:border-line hover:bg-canvas' : ''}`}>
-              <div className="min-w-0 flex-1">
-                <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
-                  <span className="truncate text-[1.05rem] font-extrabold">{row.title}</span>
-                  {row.winner && (
-                    <span className="flex items-center gap-1.5 rounded-full bg-butter px-2.5 py-0.5
-                      text-xs font-semibold text-butter-ink">
-                      🏆 {(row.winner.name || '?').split('@')[0]}
-                      <b className="font-extrabold tabular-nums">{row.winner.score}</b>
-                    </span>
-                  )}
-                </div>
-                <p className="mt-0.5 text-sm font-semibold tabular-nums text-muted">
-                  {row.questions} question{row.questions === 1 ? '' : 's'} · {when(row.last_run)}
-                  {row.players != null && ` · ${row.players} player${row.players === 1 ? '' : 's'}`}
-                </p>
-              </div>
-              {busy === row.quiz_id ? (
-                <span className="text-sm font-semibold text-anchor">Starting…</span>
-              ) : canRun && (
-                <span className="hidden text-sm font-extrabold text-anchor group-hover:inline">
-                  Run again →
-                </span>
-              )}
-              <span onClick={(e) => e.stopPropagation()}>
-                <RowMenu row={row} open={menu === id}
-                  onRerun={() => rerun(row)}
-                  onToggle={() => setMenu((m) => (m === id ? null : id))}
-                  onEdit={() => edit(row)} onCsv={(kind) => grab(row.code, kind)}
-                  onDelete={() => remove(row)} />
-              </span>
-            </div>
-          )
-        })}
-      </div>
+      {data && tab === 'games' && (
+        !games.length ? (
+          <p className="rounded-2xl border border-dashed border-line px-8 py-12 text-center text-muted">
+            Finished games land here, with how the class did and every download.
+          </p>
+        ) : !foundGames.length ? (
+          <p className="py-10 text-center text-muted">No game matches “{q}”.</p>
+        ) : (
+          <>
+            {gameTable(pageOf(foundGames, page.games, GAME_PAGE))}
+            <Pager page={page.games} total={foundGames.length} per={GAME_PAGE}
+              onPage={(n) => setPage((p) => ({ ...p, games: n }))} />
+          </>
+        )
+      )}
     </div>
+  )
+}
+
+const QUIZ_PAGE = 9     // three rows of cards
+const GAME_PAGE = 10
+const PREVIEW = 3       // games shown under the quiz cards
+const GAME_COLS = 'grid grid-cols-[minmax(0,2fr)_5rem_6rem_minmax(6rem,1fr)_2rem] items-center gap-3'
+// clamped, so deleting the last quiz on the last page lands on the page before
+const pageOf = (rows, n, per) => {
+  const at = Math.max(0, Math.min(n, Math.ceil(rows.length / per) - 1))
+  return rows.slice(at * per, at * per + per)
+}
+const day = (t) => new Date(t * 1000).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })
+
+/* Prev / next and where you are. Hidden when everything fits on one page. */
+function Pager({ page, total, per, onPage }) {
+  const pages = Math.ceil(total / per)
+  if (pages <= 1) return null
+  // a search can shrink the list under the page you were on
+  const at = Math.min(page, pages - 1)
+  const btn = `rounded-lg px-3 py-1.5 text-sm font-semibold enabled:hover:bg-track
+    disabled:opacity-35`
+  return (
+    <nav aria-label="Pages" className="mt-4 flex items-center justify-center gap-2">
+      <button className={btn} disabled={at === 0} onClick={() => onPage(at - 1)}>← Prev</button>
+      <span className="px-2 text-sm font-semibold tabular-nums text-muted">
+        Page {at + 1} of {pages}
+      </span>
+      <button className={btn} disabled={at >= pages - 1} onClick={() => onPage(at + 1)}>Next →</button>
+    </nav>
   )
 }
 
@@ -434,12 +591,22 @@ function Builder({ token, initial, onCreated, onCancel, onAuthFail }) {
   const [title, setTitle] = useState(initial.title)
   const [capacity, setCapacity] = useState(initial.capacity)
   const [questions, setQuestions] = useState(
-    initial.questions.map((q) => ({ ...q, timer: String(q.timer ?? 20) })))
+    initial.questions.map((q) => ({
+      ...q, timer: String(q.timer ?? 20),
+      // a saved quiz carries only the half its type uses; fill the other so
+      // switching type in the builder has something to edit
+      options: q.options?.length ? q.options : ['', ''], correct: q.correct ?? 0,
+      min: String(q.min ?? 1), max: String(q.max ?? 10),
+    })))
   const [err, setErr] = useState('')
   const [busy, setBusy] = useState('')      // '' | 'save' | 'start' — which button is in flight
   const [bulk, setBulk] = useState(false)
   const [mode, setMode] = useState(() => ({ ...DEFAULT_MODE, ...(initial.mode || {}) }))
-  const [showModes, setShowModes] = useState(false)
+  // open for a new quiz, where the type is the first thing to decide; a saved
+  // quiz opens on its one-line summary
+  const [showModes, setShowModes] = useState(() => !initial.questions.some((q) => q.text?.trim()))
+  const numeric = mode.grading === 'average'
+  const num = (v) => (String(v).trim() === '' ? null : Number(v))
   const readSecs = Number(localStorage.getItem(READ_KEY) || 0)
   const patch = (qi, fn) => setQuestions((qs) => qs.map((q, i) => (i === qi ? fn(q) : q)))
 
@@ -462,9 +629,12 @@ function Builder({ token, initial, onCreated, onCancel, onAuthFail }) {
         // with its own option, so that index shift is decided in exactly one place
         questions: questions.map((q) => ({
           text: q.text.trim(), timer: Number(q.timer) || 20,
-          options: q.options,
-          correct: q.correct,
-          multi: !!q.multi,
+          // a live average has no options: the blank pair a new question starts
+          // with would otherwise trip "the option marked correct is blank"
+          options: numeric ? [] : q.options,
+          correct: numeric ? null : q.correct,
+          multi: !numeric && !!q.multi,
+          min: numeric ? num(q.min) : null, max: numeric ? num(q.max) : null,
           code: q.code?.trim() ? q.code : null,   // omit the optional extras when unused
           image: q.image?.trim() ? q.image.trim() : null,
         })),
@@ -484,16 +654,13 @@ function Builder({ token, initial, onCreated, onCancel, onAuthFail }) {
             text-2xl font-extrabold tracking-tight outline-none
             placeholder:text-muted/60 focus:border-anchor focus:bg-canvas" />
         <div className="flex items-center gap-3">
-          <label className="flex items-center gap-2 text-sm font-semibold text-muted">
-            Room capacity
-            <input type="number" min="1" value={capacity} onChange={(e) => setCapacity(e.target.value)}
-              className="w-24 rounded-lg border-2 border-line px-2 py-1.5 text-ink
-                outline-none focus:border-anchor" />
-          </label>
-          <button onClick={() => setBulk((b) => !b)}
-            className="rounded-xl bg-track px-4 py-2 text-sm font-extrabold hover:brightness-95">
-            {questions.some((q) => q.text.trim()) ? 'Edit all as text' : 'Paste questions'}
-          </button>
+          {/* the text format is options-shaped; a live average has none to paste */}
+          {!numeric && (
+            <button onClick={() => setBulk((b) => !b)}
+              className="rounded-xl bg-track px-4 py-2 text-sm font-extrabold hover:brightness-95">
+              {questions.some((q) => q.text.trim()) ? 'Edit all as text' : 'Paste questions'}
+            </button>
+          )}
           <button onClick={onCancel}
             className="rounded-xl px-3 py-2 text-sm font-semibold text-muted hover:text-ink">
             Cancel
@@ -501,67 +668,71 @@ function Builder({ token, initial, onCreated, onCancel, onAuthFail }) {
         </div>
       </div>
 
-      {/* How this quiz runs. Collapsed to one sentence by default, because the
-          default is what the app has always done and most quizzes never touch it. */}
-      <div className="mb-6 mt-1">
-        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-sm text-muted">
-          <span className="font-semibold">{summarise(settle(mode))}</span>
+      {/* How this quiz runs. The type comes first because it decides which of the
+          other settings still mean anything; those it settles drop out of view. */}
+      <section className="mb-8 border-b border-line pb-6">
+        <div className="flex items-baseline justify-between gap-3">
+          <h3 className="text-xs font-semibold uppercase tracking-[.1em] text-muted">
+            How this quiz runs
+          </h3>
           <button onClick={() => setShowModes((s) => !s)}
-            className="font-semibold text-anchor hover:underline">
+            className="text-sm font-semibold text-anchor hover:underline">
             {showModes ? 'Done' : 'Change'}
           </button>
         </div>
-        {/* Segmented rows rather than dropdowns: six selects hid every choice
-            behind a click, so nobody discovered the modes existed. Laid out flat,
-            the whole grammar of a quiz reads in one glance — and a switch the
-            others have settled greys out in place instead of vanishing. */}
+
+        {!showModes && (
+          <p className="mt-2 text-sm font-semibold text-muted">{summarise(settle(mode), capacity)}</p>
+        )}
+
         {showModes && (
-          <div className="mt-3 flex flex-col gap-4 rounded-2xl border border-line
-            bg-track/40 p-[clamp(1rem,2vw,1.5rem)]">
-            <h3 className="text-xs font-semibold uppercase tracking-[.1em] text-muted">
-              How this quiz runs
-            </h3>
-            {SWITCHES.map(([key, label, opts]) => {
-              const off = switchOff(mode)[key]
-              // absolute speed needs a fixed window, which an open question has not
-              const choices = key === 'scoring' && mode.timing === 'open'
-                ? opts.filter(([v]) => v !== 'absolute') : opts
-              const current = settle(mode)[key]
-              return (
-                <div key={key} className={off ? 'opacity-45' : ''}>
-                  <div className="mb-1.5 flex items-baseline gap-2">
-                    <span className="text-sm font-semibold text-ink">{label}</span>
-                    {off && <span className="text-xs font-medium text-muted">
-                      settled by the choices above
-                    </span>}
-                  </div>
-                  <div role="group" aria-label={label} className="flex flex-wrap gap-1.5">
-                    {choices.map(([v, text]) => {
-                      const on = v === current
-                      return (
-                        <button key={String(v)} type="button" disabled={off}
-                          aria-pressed={on}
-                          onClick={() => setMode((m) => ({ ...m, [key]: v }))}
-                          className={`rounded-full px-3.5 py-2 text-sm font-semibold transition
-                            enabled:hover:brightness-95 disabled:cursor-not-allowed
-                            ${on ? 'bg-anchor text-white' : 'bg-canvas text-muted border border-line'}`}>
-                          {text}
-                        </button>
-                      )
-                    })}
-                  </div>
-                </div>
-              )
-            })}
+          <div className="mt-4 flex flex-col gap-6">
+            <div role="radiogroup" aria-label="Kind of quiz"
+              className="grid grid-cols-1 gap-2 min-[480px]:grid-cols-2 md:grid-cols-4">
+              {TYPES.map(([v, name, hint]) => {
+                const on = mode.grading === v
+                return (
+                  <button key={v} type="button" role="radio" aria-checked={on}
+                    onClick={() => setMode((m) => ({ ...m, grading: v }))}
+                    className={`flex flex-col gap-1 rounded-2xl border-2 p-4 text-left transition
+                      ${on ? 'border-anchor bg-anchor/5' : 'border-line hover:border-muted/40'}`}>
+                    <span className={`font-extrabold ${on ? 'text-anchor' : 'text-ink'}`}>{name}</span>
+                    <span className="text-sm leading-snug text-muted">{hint}</span>
+                  </button>
+                )
+              })}
+            </div>
+
+            <div className="grid grid-cols-1 items-center gap-x-6 gap-y-3
+              sm:grid-cols-[10rem_minmax(0,1fr)]">
+              {SWITCHES.filter(([k]) => !settled(mode)[k]).map(([key, label, opts]) => (
+                <Fragment key={key}>
+                  <span className="text-sm font-semibold text-ink">{label}</span>
+                  <Segmented label={label} value={settle(mode)[key]}
+                    // absolute speed needs a fixed window, which an open question has not
+                    options={key === 'scoring' && mode.timing === 'open'
+                      ? opts.filter(([v]) => v !== 'absolute') : opts}
+                    onChange={(v) => setMode((m) => ({ ...m, [key]: v }))} />
+                </Fragment>
+              ))}
+              <label htmlFor="capacity" className="text-sm font-semibold text-ink">Room holds</label>
+              <span className="flex items-center gap-2 text-sm font-semibold text-muted">
+                <input id="capacity" type="number" min="1" value={capacity}
+                  onChange={(e) => setCapacity(e.target.value)}
+                  className="w-24 rounded-lg border-2 border-line px-2 py-1.5 text-ink
+                    outline-none focus:border-anchor" />
+                players — leave room for stragglers
+              </span>
+            </div>
           </div>
         )}
-      </div>
+      </section>
 
       {bulk && (
         <BulkImport existing={questions} graded={mode.grading === 'graded'}
           onClose={() => setBulk(false)}
           onLoad={(qs) => {
-            setQuestions(qs.map((q) => ({ ...q, timer: String(q.timer) })))
+            setQuestions(qs.map((q) => ({ ...q, timer: String(q.timer), min: '1', max: '10' })))
             setBulk(false)
             setErr('')
           }} />
@@ -610,6 +781,23 @@ function Builder({ token, initial, onCreated, onCancel, onAuthFail }) {
               </button>
             )}
 
+            {numeric ? (
+              /* inclusive both ends — the server enforces the same range on every answer */
+              <div className="flex flex-wrap items-center gap-2 rounded-xl bg-peri px-4 py-3
+                text-sm font-semibold text-peri-ink">
+                Students answer a whole number from
+                {['min', 'max'].map((k, i) => (
+                  <Fragment key={k}>
+                    {i > 0 && <span>to</span>}
+                    <input type="number" step="1" value={q[k]}
+                      aria-label={`${k === 'min' ? 'Lowest' : 'Highest'} answer for question ${qi + 1}`}
+                      onChange={(e) => patch(qi, (x) => ({ ...x, [k]: e.target.value }))}
+                      className="w-24 rounded-lg border-2 border-transparent bg-canvas px-2 py-1.5
+                        text-center text-ink outline-none focus:border-anchor" />
+                  </Fragment>
+                ))}
+              </div>
+            ) : (
             <div className="flex flex-col gap-2">
               {q.options.map((opt, oi) => {
                 const t = tone(oi)
@@ -665,6 +853,7 @@ function Builder({ token, initial, onCreated, onCancel, onAuthFail }) {
                 </label>
               </div>
             </div>
+            )}
           </div>
         ))}
       </div>
@@ -726,13 +915,15 @@ function Host({ token, code, onExit, onGone, onAuthFail }) {
      a tunnel already gives the right origin; this override covers hosting on
      localhost while players come in over ngrok. */
   const [base, setBase] = useState(() => localStorage.getItem(BASE_KEY) || location.origin)
+  // a host setting, not something for the room to read off the projector
+  const [editBase, setEditBase] = useState(false)
   const cleanBase = base.trim().replace(/\/+$/, '') || location.origin
   const joinUrl = `${cleanBase}/join/${code}`
   let publicHost = location.host
   try { publicHost = new URL(cleanBase).host } catch { /* mid-typing, keep the last good one */ }
 
   useEffect(() => {
-    QRCode.toDataURL(joinUrl, { margin: 1, width: 260, color: { dark: '#1B2333', light: '#FFFFFF' } })
+    QRCode.toDataURL(joinUrl, { margin: 1, width: 640, color: { dark: '#1B2333', light: '#FFFFFF' } })
       .then(setQr).catch(() => setQr(''))
   }, [joinUrl])
 
@@ -760,6 +951,8 @@ function Host({ token, code, onExit, onGone, onAuthFail }) {
         setProgress(m)
         // a live poll's columns arrive on this message; hold them on the question
         if (m.tally) setQuestion((q) => (q ? { ...q, tally: m.tally } : q))
+        // and a live average's running numbers, the same way
+        if (m.spread) setQuestion((q) => (q ? { ...q, spread: m.spread } : q))
         break
       // one payload drives both insight screens; the host steps through them
       case 'results': setResults(m); setPhase('bars'); break
@@ -839,29 +1032,42 @@ function Host({ token, code, onExit, onGone, onAuthFail }) {
           that is the whole point — latecomers get a door, and nobody is halfway
           through reading Q4 when it appears. */}
       {(phase === 'lobby' || phase === 'waiting') && (
-        <div className="grid flex-1 grid-cols-1 items-stretch gap-6 md:grid-cols-[minmax(0,31%)_1fr]">
-          <div className="flex flex-col items-center justify-center gap-3 rounded-3xl bg-track p-6">
-            <span className="text-xs font-semibold uppercase tracking-[.1em] text-muted">Room code</span>
-            <span className="text-[clamp(1.8rem,4vw,3.4rem)] font-extrabold tracking-[.12em] text-anchor">
+        <div className="grid flex-1 grid-cols-1 items-stretch gap-6 md:grid-cols-[minmax(0,40%)_1fr]">
+          <div className="flex min-h-0 flex-col items-center justify-center gap-3 rounded-3xl bg-track p-6">
+            <span className="text-[clamp(1.8rem,4.4vw,3.8rem)] font-extrabold tracking-[.12em] text-anchor">
               {code}
             </span>
-            {qr && <img src={qr} alt={`QR code to join room ${code}`} className="w-[min(58%,15rem)] rounded-xl" />}
+            {/* sized against the screen height too, so the code and link still fit
+                under it on a short projector */}
+            {qr && <img src={qr} alt={`QR code to join room ${code}`}
+              className="w-[min(84%,48vh)] rounded-2xl bg-white p-2" />}
             <button onClick={copyLink} title="Copy join link"
               className={`max-w-full truncate text-xs hover:text-anchor
                 ${copied ? 'font-bold text-mint-ink' : 'text-muted'}`}>
               {copied ? 'Copied ✓' : joinUrl}
             </button>
-            <input value={base} aria-label="Public address players use"
-              placeholder="https://your-tunnel.ngrok-free.app"
-              onChange={(e) => {
-                setBase(e.target.value)
-                localStorage.setItem(BASE_KEY, e.target.value)
-              }}
-              className="w-full rounded-lg border border-line bg-canvas px-2 py-1.5 text-center
-                text-xs outline-none placeholder:text-muted/50 focus:border-anchor" />
-            <span className="text-[11px] text-muted">
-              Public address — change it if players join through a tunnel
-            </span>
+            {editBase ? (
+              <>
+                <input value={base} aria-label="Public address players use" autoFocus
+                  placeholder="https://your-tunnel.ngrok-free.app"
+                  onChange={(e) => {
+                    setBase(e.target.value)
+                    localStorage.setItem(BASE_KEY, e.target.value)
+                  }}
+                  onKeyDown={(e) => e.key === 'Enter' && setEditBase(false)}
+                  className="w-full rounded-lg border border-line bg-canvas px-2 py-1.5 text-center
+                    text-xs outline-none placeholder:text-muted/50 focus:border-anchor" />
+                <button onClick={() => setEditBase(false)}
+                  className="text-[11px] font-semibold text-anchor hover:underline">
+                  Done — players join through this address
+                </button>
+              </>
+            ) : (
+              <button onClick={() => setEditBase(true)}
+                className="text-[11px] font-semibold text-muted hover:text-anchor">
+                Joining through a tunnel? Change address…
+              </button>
+            )}
           </div>
 
           <div className="flex min-w-0 flex-col gap-4">
@@ -919,7 +1125,9 @@ function Host({ token, code, onExit, onGone, onAuthFail }) {
             <>
               {/* a live poll fills its columns as the taps land; every other
                   question just shows the options and keeps the counts private */}
-              {question.tally ? (
+              {question.range ? (
+                <AverageMeter spread={question.spread} range={question.range} />
+              ) : question.tally ? (
                 <PollColumns tally={question.tally} options={question.options}
                   of={question.multi ? progress.answered : undefined} />
               ) : (
@@ -949,7 +1157,7 @@ function Host({ token, code, onExit, onGone, onAuthFail }) {
                       {clock(openFor)}
                     </b>
                     <Button onClick={next} disabled={advancing} className="flex-none">
-                      {question.tally ? 'Close poll →' : 'Finish question →'}
+                      {question.tally || question.range ? 'Close poll →' : 'Finish question →'}
                     </Button>
                   </span>
                 )}
@@ -967,22 +1175,37 @@ function Host({ token, code, onExit, onGone, onAuthFail }) {
               {question?.text}
             </h2>
           </div>
+          {/* the line the host reads out, so it sits up here and large. The answer
+              itself is already the one bar left in colour — not repeated here. */}
+          {(() => {
+            const answered = results.spread?.count ?? results.answered
+              ?? results.tally.reduce((a, b) => a + b, 0)
+            const of = results.total_players
+            // got_it, not one bar's count: on a select-all question nobody's
+            // single option says who got the whole set right
+            const got = results.correct != null ? (results.got_it ?? results.tally[results.correct]) : null
+            return (
+              <p className="flex-none text-[clamp(1.1rem,2.6vw,2.4rem)] font-extrabold tabular-nums">
+                {got != null ? <>{got} of {of} got it</> : <>{answered} of {of} answered</>}
+                {got != null && of > 0 && (
+                  <span className="text-[.7em] font-semibold text-muted"> · {Math.round((got / of) * 100)}%</span>
+                )}
+              </p>
+            )
+          })()}
           {/* keep the snippet on screen while the room discusses the answer */}
           <QuestionMedia code={results.code} image={results.image} className="max-h-[26vh]" />
           {/* a live poll settles into the columns it just filled, rather than
               swapping to a different chart of the same numbers */}
-          {results.poll || question?.tally
+          {results.spread
+            ? <AverageMeter spread={results.spread} range={results.range} done />
+            : results.poll || question?.tally
             ? <PollColumns tally={results.tally} options={results.options}
                 of={results.multi ? results.answered : undefined} />
             : <ResultBars tally={results.tally} options={results.options}
                 correct={results.correct} of={results.answered} />}
           <div className="flex flex-none items-center justify-between gap-4">
-            <span className="font-semibold text-muted">
-              {results.correct != null
-                ? <>Correct answer{results.multi ? 's' : ''} · {answerText(results.options, results.correct)} ·{' '}
-                  {results.got_it ?? results.tally[results.correct]} of {results.total_players} got it</>
-                : <>{results.answered ?? results.tally.reduce((a, b) => a + b, 0)} of {results.total_players} answered</>}
-            </span>
+            <span />
             {/* one forward button, whatever comes next — with no leaderboard to show,
                 this is the only thing that advances the room */}
             <Button onClick={results.leaderboard
@@ -1042,7 +1265,8 @@ function Host({ token, code, onExit, onGone, onAuthFail }) {
                 </p>
               </div>
             )}
-          <div className="flex flex-none flex-wrap items-center justify-center gap-2">
+          <div className="flex flex-none items-center gap-3">
+          <div className="flex min-w-0 flex-1 flex-wrap items-center justify-center gap-2">
             {/* by rank, not by index — a tie on the podium makes them differ,
                 and slicing by index would list a medallist again as 4th */}
             {(over.leaderboard || []).filter((p) => (p.rank ?? 99) > 3).slice(0, 5).map((p) => (
@@ -1052,21 +1276,32 @@ function Host({ token, code, onExit, onGone, onAuthFail }) {
                 <b className="font-extrabold tabular-nums">{p.score}</b>
               </span>
             ))}
+          </div>
+          {/* The downloads are the host's, not the room's — on the projector they
+              sat between the 4th and 5th place names. One quiet menu instead;
+              a native <details>, so it needs no open/close state of its own. */}
+          <div className="flex flex-none items-center gap-2">
             {/* ended before a single question was revealed: nothing to download */}
-            {(!over.quit || over.asked > 0) && <>
-            <Button onClick={() => grab('report')}>Download report</Button>
-            {/* the report is the one worth pressing, so it is the filled button;
-                the narrower cuts sit beside it for whoever wants just one */}
-            {['scores', 'responses', 'questions'].map((k) => (
-              <button key={k} onClick={() => grab(k)}
-                className="rounded-xl bg-track px-4 py-3 text-[clamp(.7rem,1.2vw,.95rem)]
-                  font-semibold hover:brightness-95">
-                {EXPORTS[k].label}
-              </button>
-            ))}
-            </>}
-            <button onClick={onExit}
-              className="rounded-xl px-4 py-3 font-semibold text-muted hover:text-ink">Done</button>
+            {(!over.quit || over.asked > 0) && (
+            <details className="relative">
+              <summary className="cursor-pointer list-none rounded-xl border border-line px-4 py-3
+                text-sm font-semibold text-muted hover:text-ink [&::-webkit-details-marker]:hidden">
+                Downloads ▾
+              </summary>
+              <div className="absolute bottom-full right-0 z-20 mb-2 flex w-60 flex-col rounded-xl
+                border border-line bg-canvas p-1 shadow-lg">
+                {['report', 'scores', 'responses', 'questions'].map((k, i) => (
+                  <button key={k} onClick={() => grab(k)}
+                    className={`rounded-lg px-3 py-2 text-left text-sm hover:bg-track
+                      ${i === 0 ? 'font-extrabold' : 'font-semibold'}`}>
+                    {i === 0 ? 'Full report' : EXPORTS[k].label}
+                  </button>
+                ))}
+              </div>
+            </details>
+            )}
+            <Button onClick={onExit}>Done</Button>
+          </div>
           </div>
         </>
       )}

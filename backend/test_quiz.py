@@ -1090,6 +1090,75 @@ def test_a_single_answer_question_ignores_lists_and_picks():
 
     asyncio.run(drive())
 
+
+def test_a_live_average_takes_numbers_in_range_and_keeps_the_mean_on_the_console():
+    """Students type a whole number between the question's limits. The running
+    average is the console's alone while the question is open — a phone that could
+    see it would answer the crowd — and goes to everyone once it is closed."""
+    import asyncio
+    from app.report import build_report
+    r = Room("AVG", 60, [{"text": "Hours slept?", "options": [], "correct": None,
+                          "min": 0, "max": 12, "timer": 20}],
+             advance_timeout=900, mode={"grading": "average"})
+    assert r.mode["scoring"] == "none" and r.mode["timing"] == "open"
+    r.state = "question"; r.q_index = 0; r.q_start = time.time()
+    for seat in "abcde":
+        r.players[seat] = Player(seat)
+
+    # out of range, not a whole number, or a bool posing as one: all refused
+    for bad in (-1, 13, 7.5, "7", True, None):
+        assert not r.record_answer("a", bad), bad
+    assert r.record_answer("a", 0) and r.record_answer("b", 12)   # both ends allowed
+    r.record_answer("c", 6); r.record_answer("d", 7)
+
+    assert r.progress_msg()["spread"] == {"count": 4, "average": 6.25, "median": 6.5}
+    phone = r.question_msg()
+    assert phone["range"] == [0, 12] and "options" not in phone
+    assert "spread" not in phone, "a phone must not see the running average"
+    assert r.question_msg(host=True)["spread"]["average"] == 6.25
+
+    asyncio.run(r._reveal(0, r.questions[0]))
+    assert r.last_results["spread"]["average"] == 6.25, "the closed question shares it"
+    assert "leaderboard" not in r.last_results
+
+    rows = build_csv(r).splitlines()
+    assert "e,0,,0," in rows, rows        # in the room, did not answer
+    assert any(row.startswith("b,0,12,,") for row in rows), rows
+    rep = build_report(r)
+    q = rep["questions"][0]
+    assert q["range"] == [0, 12] and q["stats"]["average"] == 6.25
+    assert q["stats"]["median"] == 6.5 and q["stats"]["answered"] == 4
+    b = next(p for p in rep["participants"] if p["name"] == "b")
+    assert b["responses"][0]["answer"] == 12 and b["responses"][0]["option"] is None
+
+
+def test_a_quiz_checks_options_or_a_range_depending_on_its_type():
+    from pydantic import ValidationError
+    from app.models import QuizIn
+
+    def quiz(mode, **qkw):
+        return QuizIn(title="T", capacity=10, mode=mode,
+                      questions=[{"text": "Q", "options": ["a", "b"], "correct": 0, **qkw}])
+
+    avg = quiz({"grading": "average"}, min=1, max=10)
+    q = avg.questions[0]
+    assert (q.min, q.max, q.options, q.correct) == (1, 10, [], None), q
+    # and switching the same questions back to graded drops the stale range
+    assert quiz({}, min=1, max=10).questions[0].min is None
+    for bad in ({}, {"min": 5}, {"min": 5, "max": 5}, {"min": 9, "max": 2},
+                {"min": 0, "max": 10**12}):
+        try:
+            quiz({"grading": "average"}, **bad)
+            raise AssertionError(f"accepted {bad}")
+        except ValidationError:
+            pass
+    try:
+        QuizIn(title="T", capacity=10, questions=[{"text": "Q", "options": ["only"]}])
+        raise AssertionError("a graded question with one option was accepted")
+    except ValidationError:
+        pass
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

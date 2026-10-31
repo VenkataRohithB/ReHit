@@ -14,10 +14,12 @@ class LoginReq(BaseModel):
 
 class QuestionIn(BaseModel):
     text: str
-    options: list[str]
+    options: list[str] = []      # empty for a live-average question
     # an index, or a list of them on a select-all question; a poll has no key
     correct: int | list[int] | None = None
     multi: bool = False          # "Select all that apply": ticks and a Submit
+    min: int | None = None       # a live-average question's answer range, inclusive
+    max: int | None = None
     timer: int = 20
     code: str | None = None    # optional snippet shown above the options
     image: str | None = None   # optional illustration, by URL
@@ -85,8 +87,7 @@ class QuestionIn(BaseModel):
     @classmethod
     def _options(cls, v):
         v = [o.strip() for o in v if o.strip()]
-        if len(v) < 2:
-            raise ValueError("at least 2 options required")
+        # the at-least-2 rule lives on QuizIn: a live-average question has none
         if len(v) > settings.max_options:
             raise ValueError(f"at most {settings.max_options} options")
         return v
@@ -96,6 +97,13 @@ class QuestionIn(BaseModel):
     def _timer(cls, v):
         if not (1 <= v <= settings.max_timer):
             raise ValueError(f"timer must be between 1 and {settings.max_timer}s")
+        return v
+
+    @field_validator("min", "max")
+    @classmethod
+    def _bound(cls, v):
+        if v is not None and abs(v) > 1_000_000_000:
+            raise ValueError("range limits must be within ±1,000,000,000")
         return v
 
     @model_validator(mode="after")
@@ -165,4 +173,25 @@ class QuizIn(BaseModel):
             for i, q in enumerate(self.questions):
                 if q.multi and q.correct is None:
                     raise ValueError(f"question {i + 1} needs at least one correct answer")
+        return self
+
+    @model_validator(mode="after")
+    def _shape(self):
+        """Options or a range — which one depends on the quiz type, so only the
+        quiz can check it. The unused half is cleared, so a quiz switched between
+        types never carries a stale answer key or range into the room."""
+        # clean_mode again: an omitted `mode` is a default, and pydantic does not
+        # run field validators on defaults
+        average = clean_mode(self.mode)["grading"] == "average"
+        for n, q in enumerate(self.questions, 1):
+            if average:
+                if q.min is None or q.max is None:
+                    raise ValueError(f"Q{n}: set the lowest and highest answer allowed")
+                if q.min >= q.max:
+                    raise ValueError(f"Q{n}: the lowest answer must be below the highest")
+                q.options, q.correct, q.multi = [], None, False
+            else:
+                if len(q.options) < 2:
+                    raise ValueError(f"Q{n}: at least 2 options required")
+                q.min = q.max = None
         return self

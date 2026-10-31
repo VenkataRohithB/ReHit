@@ -100,7 +100,8 @@ def quiz_summaries():
     with _conn() as c:
         rows = c.execute(
             "SELECT id, title, capacity, created, used, "
-            "       json_array_length(questions) AS questions "
+            "       json_array_length(questions) AS questions, "
+            "       json_extract(mode, '$.grading') AS grading "
             "FROM quizzes ORDER BY used DESC LIMIT ?", (settings.saved_quizzes,),
         ).fetchall()
     return [dict(r) for r in rows]
@@ -161,6 +162,29 @@ def recent(limit=10):
                                 for t in json.loads(r["top"])]} for r in rows]
 
 
+def games(limit=None):
+    """Every finished game, newest first, with how the class did. The numbers are
+    read out of the stored report, so a game archived before reports existed
+    simply has none rather than wrong ones."""
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT code, title, ended, questions, players, top, "
+            # NULLIF: an old row's report is '', which json_extract rejects outright
+            "  json_extract(NULLIF(report, ''), '$.summary.average_score') AS average_score, "
+            "  json_extract(NULLIF(report, ''), '$.summary.average_accuracy_percent') AS accuracy, "
+            "  json_extract(NULLIF(report, ''), '$.quiz.mode.grading') AS grading "
+            "FROM rooms ORDER BY ended DESC LIMIT ?", (limit or settings.history_limit,),
+        ).fetchall()
+    out = []
+    for r in rows:
+        g = dict(r)
+        top = json.loads(g.pop("top"))
+        w = top[0] if top else None
+        out.append({**g, "title": g["title"] or "Untitled quiz",
+                    "winner": {**w, "name": w.get("name") or w.get("email", "")} if w else None})
+    return out
+
+
 def activity():
     """One list for the dashboard: every quiz, newest first, carrying the result
     of the last time it was run. Quizzes and games are separate tables but the
@@ -180,6 +204,7 @@ def activity():
             "title": (q or r)["title"] or "Untitled quiz",
             "questions": (q or r)["questions"],
             "capacity": q["capacity"] if q else None,
+            "grading": (q or {}).get("grading") or "graded",
             "last_run": q["used"] if q else r["ended"],
             "code": r["code"] if r else None,                # None -> never finished
             "players": r["players"] if r else None,

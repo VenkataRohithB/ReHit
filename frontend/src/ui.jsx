@@ -517,14 +517,62 @@ export function PollColumns({ tally, options, of }) {
   )
 }
 
+/* One decimal at most: an average of whole numbers reads as 6.3, never 6.2500. */
+export const avgText = (n) => (n == null ? '—' : n.toLocaleString(undefined, { maximumFractionDigits: 1 }))
+
+/* Live average — one big number and where it sits in the allowed range.
+   Not a Ticker: that counts up from zero on every change, and this number moves
+   with every answer, so it would flicker back to 0 thirty times a minute.
+   Host-only while the question is open, for the same reason as PollColumns. */
+export function AverageMeter({ spread, range, done = false }) {
+  const [lo, hi] = range
+  const avg = spread?.average
+  const pos = avg == null ? 0 : ((avg - lo) / (hi - lo)) * 100
+  const move = still() ? 'none' : `all .55s ${CALM}`
+  return (
+    <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-[clamp(1rem,5vh,3.5rem)]">
+      <div className="flex flex-col items-center gap-2">
+        <span className="text-xs font-semibold uppercase tracking-[.1em] text-muted">
+          {done ? 'Class average' : 'Average so far'}
+        </span>
+        {avg == null
+          ? <span className="py-[clamp(1rem,6vh,4rem)] text-[clamp(1.2rem,3vw,2.4rem)] font-semibold
+              text-muted">Waiting for the first answer…</span>
+          : <span className="text-[clamp(4rem,min(18vw,26vh),13rem)] font-extrabold leading-none
+              tracking-tight tabular-nums">{avgText(avg)}</span>}
+        {done && spread?.median != null && (
+          <span className="text-[clamp(.9rem,1.8vw,1.4rem)] font-semibold text-muted">
+            median <b className="tabular-nums text-ink">{avgText(spread.median)}</b>
+          </span>
+        )}
+      </div>
+      <div className="w-[min(52rem,100%)]">
+        <div className="relative h-[clamp(.6rem,1.4vh,1rem)] rounded-full bg-track">
+          {avg != null && <>
+            <div className="absolute inset-y-0 left-0 rounded-full bg-peri"
+              style={{ width: `${pos}%`, transition: move }} />
+            <span className="absolute top-1/2 size-[clamp(1.2rem,2.8vh,2rem)] -translate-x-1/2
+              -translate-y-1/2 rounded-full border-4 border-canvas bg-peri-ink"
+              style={{ left: `${pos}%`, transition: move }} />
+          </>}
+        </div>
+        <div className="mt-2 flex justify-between text-[clamp(.8rem,1.6vw,1.2rem)] font-semibold
+          tabular-nums text-muted">
+          <span>{lo}</span><span>{hi}</span>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 /* relative + z-10 so the racing bar fill behind it cannot paint over the arrow */
 function Arrow({ d }) {
   if (!d) return (
-    <span className="relative z-10 w-8 flex-none text-right text-[.7em] font-bold text-muted/50">–</span>
+    <span className="relative z-10 w-[2.6em] flex-none text-right text-[.7em] font-bold text-muted/50">–</span>
   )
   const up = d > 0
   return (
-    <span className={`relative z-10 w-8 flex-none text-right text-[.7em] font-bold
+    <span className={`relative z-10 w-[2.6em] flex-none text-right text-[.7em] font-bold
       ${up ? 'text-mint-ink' : 'text-rose-ink'}`}>
       {up ? '▲' : '▼'}{Math.abs(d)}
     </span>
@@ -644,6 +692,10 @@ export function RaceBoard({ rows, meName, raceMs = 1900 }) {
   })
 
   const max = Math.max(...rows.map((r) => r.score), 1)
+  /* Type scales with how many rows share the screen: five players get rows big
+     enough to read from the back of a lecture hall, fifteen still fit above the
+     host's button. Height-based, because the projector's height is the limit. */
+  const size = `clamp(.85rem, ${Math.min(5, 26 / rows.length).toFixed(2)}vh, 2.6rem)`
   const rankOf = new Map(rows.map((r, i) => [r.name, (r.rank ?? i + 1) - 1]))
 
   const row = (p) => {
@@ -655,8 +707,9 @@ export function RaceBoard({ rows, meName, raceMs = 1900 }) {
     const fill = i < 3 ? RANK_FILL[i] : 'bg-ink/[.07]'
     return (
       <div key={p.name} ref={(el) => el ? els.current.set(p.name, el) : els.current.delete(p.name)}
-        className={`relative flex items-center gap-3 overflow-hidden rounded-xl ${medal}
-          px-3 py-[clamp(.15rem,.5vh,.45rem)] text-[clamp(.7rem,2vh,1.25rem)]
+        style={{ fontSize: size }}
+        className={`relative flex max-h-[13vh] min-h-0 flex-1 basis-0 items-center gap-[.6em]
+          overflow-hidden rounded-[.55em] px-[.7em] ${medal}
           ${p.name === meName ? 'ring-2 ring-inset ring-anchor' : ''}`}>
         <div className={`absolute inset-y-0 left-0 ${fill}`}
           style={{
@@ -665,7 +718,8 @@ export function RaceBoard({ rows, meName, raceMs = 1900 }) {
           }} />
         <span className={`relative z-10 grid aspect-square w-[1.9em] flex-none place-items-center
           rounded-full text-[.78em] font-extrabold tabular-nums ${pill}`}>{i + 1}</span>
-        <span className="relative z-10 flex-1 truncate font-semibold">{p.name}</span>
+        <span className="relative z-10 flex-none">{faceOf(p.name)}</span>
+        <span className="relative z-10 flex-1 truncate font-extrabold">{p.name.split('@')[0]}</span>
         <Arrow d={p.delta} />
         <span className="relative z-10 min-w-[3.2em] text-right text-[1.05em] font-extrabold">
           <Ticker to={p.score} ms={900} />
@@ -680,7 +734,7 @@ export function RaceBoard({ rows, meName, raceMs = 1900 }) {
      order. Row type is sized in vh instead, so a full board still lands above
      the host's button on a projector without splitting it. */
   return (
-    <div className="flex min-h-0 flex-1 flex-col justify-center gap-[clamp(.15rem,.5vh,.45rem)]">
+    <div className="flex min-h-0 flex-1 flex-col justify-center gap-[clamp(.2rem,.9vh,.7rem)]">
       {order.map(row)}
     </div>
   )

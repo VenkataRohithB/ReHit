@@ -162,7 +162,7 @@ def activity(_: str = Depends(require_admin)):
              "state": r.state, "created": r.created}
             for r in manager.rooms.values() if r.state != "ended"]
     live.sort(key=lambda r: r["created"], reverse=True)
-    return {"live": live, "rows": store.activity()}
+    return {"live": live, "rows": store.activity(), "games": store.games()}
 
 
 @app.get("/api/quizzes/{qid}")

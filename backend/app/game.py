@@ -11,6 +11,7 @@ import csv
 import io
 import logging
 import secrets
+import statistics
 import time
 
 SEND_TIMEOUT = 5   # seconds before a stalled client is dropped from a broadcast
@@ -27,7 +28,7 @@ async def _hang_up(ws):
 # come back as the quiz that used to run.
 MODES = {
     "identity": ("email", "name", "anonymous"),
-    "grading":  ("graded", "feedback", "livepoll"),
+    "grading":  ("graded", "feedback", "livepoll", "average"),
     "scoring":  ("absolute", "relative", "flat", "none"),
     "reveal":   (True, False),
     "board":    ("always", "end", "never"),
@@ -52,9 +53,9 @@ def clean_mode(m):
     """
     m = m or {}
     out = {k: (m.get(k) if m.get(k) in vals else vals[0]) for k, vals in MODES.items()}
-    if out["grading"] in ("feedback", "livepoll"):
+    if out["grading"] != "graded":
         out["scoring"] = "none"
-    if out["grading"] == "livepoll":
+    if out["grading"] in ("livepoll", "average"):
         # the columns fill as the room answers and the host closes it when the
         # answers stop coming — a countdown would cut the discussion off
         out["timing"] = "open"
@@ -138,6 +139,16 @@ def tally_of(responses, n_options):
     return counts
 
 
+def spread_of(responses):
+    """A live-average question's numbers: how many answered, the mean, and the
+    median, which is what to look at when a few extreme answers drag the mean."""
+    vals = [v for v, _ in responses.values()]
+    if not vals:
+        return {"count": 0, "average": None, "median": None}
+    return {"count": len(vals), "average": round(statistics.fmean(vals), 2),
+            "median": statistics.median(vals)}
+
+
 def absent_answer():
     """Stand-in for a question a player was not in the room for. Scores nothing,
     like an unanswered one, but stays distinguishable so the CSV can leave the
@@ -199,6 +210,8 @@ class Room:
         self.read_secs = read_secs
         self.mode = clean_mode(mode)
         self.timed = self.mode["timing"] == "countdown"
+        # every question takes a whole number in [min, max] instead of an option
+        self.numeric = self.mode["grading"] == "average"
         self.read_len = 0        # this question's reading phase
         self.answer_len = 0      # this question's answering phase — scoring uses this
         self.read_ends = 0.0
@@ -302,6 +315,10 @@ class Room:
         downstream: an ungraded question has correct=None, and a null answer
         must never be able to match it and score."""
         q = self.questions[self.q_index]
+        if self.numeric:
+            # a live average takes one whole number inside the question's range
+            ok_num = isinstance(opt, int) and not isinstance(opt, bool)
+            return opt if ok_num and q["min"] <= opt <= q["max"] else None
         n = len(q["options"])
 
         def ok(i):
@@ -422,7 +439,10 @@ class Room:
             # the same reason `remaining` is one.
             msg["elapsed"] = max(0.0, round(time.time() - self.q_start, 2))
         if not reading:
-            msg["options"] = q["options"]        # withheld until the reveal
+            if self.numeric:
+                msg["range"] = [q["min"], q["max"]]
+            else:
+                msg["options"] = q["options"]    # withheld until the reveal
         if host and not reading:
             # so the console opens on "0 of 24 answered" rather than "0 of 0" and
             # never has to wait for the first answer to learn the room size
@@ -430,6 +450,8 @@ class Room:
             msg["players"] = len(self.players)
             if self.mode["grading"] == "livepoll":
                 msg["tally"] = tally_of(self.responses, len(q["options"]))
+            if self.numeric:
+                msg["spread"] = spread_of(self.responses)
         return msg
 
     async def broadcast_question(self):
@@ -448,6 +470,10 @@ class Room:
             # the live columns. Hosts only — this never reaches a phone
             msg["tally"] = tally_of(self.responses,
                                     len(self.questions[self.q_index]["options"]))
+        if self.numeric:
+            # the running average, hosts only, for the same reason as the tally:
+            # a phone that can see it answers the crowd instead of the question
+            msg["spread"] = spread_of(self.responses)
         return msg
 
     def board_msg_for(self, player):
@@ -701,7 +727,7 @@ class Room:
         # told it has no right answer
         graded = self.mode["grading"] == "graded" and answer_key(q) is not None
         score = self._scorer()
-        tally = tally_of(self.responses, len(q["options"]))
+        tally = [] if self.numeric else tally_of(self.responses, len(q["options"]))
         for email, p in self.players.items():
             resp = self.responses.get(email)
             if resp is None:
@@ -738,6 +764,11 @@ class Room:
             # so a console that reconnects into this screen still draws the poll
             # columns rather than falling back to the graded bars
             base["poll"] = True
+        if self.numeric:
+            # once it is closed the number can no longer sway anyone, so the
+            # phones get it too
+            base["spread"] = spread_of(self.responses)
+            base["range"] = [q["min"], q["max"]]
 
         # The standings are the host's to reveal. Sending them with the results
         # put the whole leaderboard on every phone while the host was still on
@@ -753,11 +784,16 @@ class Room:
             self.last_board = {"type": "board", "index": i, "leaderboard": board,
                                "total_players": len(self.players),
                                "last": base["last"]}
+        before = self.prev_rank
         self.prev_rank = rank_of   # must come after board(), which reads the old ranks
         scored = self.mode["scoring"] != "none"
         await self._fan_out([
             (p, {**base, **({"your_score": p.score, "your_rank": rank_of[p.email],
-                             "gained": p.answers[-1]["points"]} if scored else {})})
+                             "gained": p.answers[-1]["points"],
+                             # places climbed since the last question; 0 on the first
+                             # one, or for someone who just walked in
+                             "your_move": before[p.email] - rank_of[p.email]
+                             if p.email in before else 0} if scored else {})})
             for p in list(self.players.values()) if p.ws
         ])
         await self.send_hosts(host_msg)
@@ -870,7 +906,9 @@ def build_csv(room):
             a = p.answers[i] if i < len(p.answers) else None
             opts = room.questions[i]["options"]
             picks = picks_of(a["option"]) if a else []
-            if picks and all(isinstance(j, int) and 0 <= j < len(opts) for j in picks):
+            if a and room.numeric and isinstance(a["option"], int):
+                row += [a["option"], "", a["time"]]   # the number they gave; nothing to grade
+            elif picks and all(isinstance(j, int) and 0 <= j < len(opts) for j in picks):
                 row += [" + ".join(opts[j] for j in picks),
                         1 if a["correct"] else 0, a["time"]]
             elif a and a.get("absent"):
